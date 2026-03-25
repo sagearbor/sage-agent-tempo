@@ -280,22 +280,13 @@ A single `.html` file (no server needed) with: Gantt chart showing checklist ite
 
 ### Excalidraw diagrams
 
-Architecture breakdown and timeline diagrams as `.excalidraw` JSON files, compatible with the `excalidraw-diagram-generator` Claude Code skill and excalidraw.com.
-
-For automatic PNG export alongside `.excalidraw` files, optionally install:
-
-```bash
-npm install @swiftlysingh/excalidraw-cli
-```
-
-If installed, `.png` files are generated at 2x scale next to each `.excalidraw` file. If not installed, PNG export is silently skipped.
+Architecture breakdown and timeline diagrams as `.excalidraw` JSON files, compatible with the `excalidraw-diagram-generator` Claude Code skill and excalidraw.com. To convert to PNG, open in excalidraw.com or ask Claude Code to render them.
 
 ## Requirements
 
 - Node.js 18+
 - Claude Code (for skill usage and hooks)
 - Git (for commit correlation)
-- (Optional) `@swiftlysingh/excalidraw-cli` for PNG export of Excalidraw diagrams
 
 ## How it handles the hard parts
 

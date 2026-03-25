@@ -2,10 +2,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { claudeCodeParser, parseProjectSessions } from "./claude-code.js";
-import { codexParser, parseAllSessions } from "./codex.js";
+import { codexParser, parseAllSessions as parseAllCodexSessions } from "./codex.js";
+import { geminiParser, parseAllSessions as parseAllGeminiSessions } from "./gemini.js";
 import type { AgentParser, SessionSummary } from "./types.js";
 
-export type DetectedAgent = "claude-code" | "codex" | "unknown";
+export type DetectedAgent = "claude-code" | "codex" | "gemini" | "unknown";
 
 export function detectAgent(): DetectedAgent[] {
   const agents: DetectedAgent[] = [];
@@ -17,6 +18,9 @@ export function detectAgent(): DetectedAgent[] {
   if (existsSync(join(home, ".codex", "sessions"))) {
     agents.push("codex");
   }
+  if (existsSync(join(home, ".gemini", "tmp"))) {
+    agents.push("gemini");
+  }
 
   return agents.length > 0 ? agents : ["unknown"];
 }
@@ -27,8 +31,10 @@ export function getParser(agent: string): AgentParser {
       return claudeCodeParser;
     case "codex":
       return codexParser;
+    case "gemini":
+      return geminiParser;
     default:
-      throw new Error(`Unknown agent: "${agent}". Supported: claude-code, codex`);
+      throw new Error(`Unknown agent: "${agent}". Supported: claude-code, codex, gemini`);
   }
 }
 
@@ -53,7 +59,11 @@ export async function parseAuto(
       allSessions.push(...sessions);
     } else if (agent === "codex") {
       const dir = opts.sessionDir || join(homedir(), ".codex");
-      const sessions = await parseAllSessions(dir);
+      const sessions = await parseAllCodexSessions(dir);
+      allSessions.push(...sessions);
+    } else if (agent === "gemini") {
+      const dir = opts.sessionDir || join(homedir(), ".gemini");
+      const sessions = await parseAllGeminiSessions(dir);
       allSessions.push(...sessions);
     }
   }
@@ -63,4 +73,5 @@ export async function parseAuto(
 
 export { claudeCodeParser } from "./claude-code.js";
 export { codexParser } from "./codex.js";
+export { geminiParser } from "./gemini.js";
 export * from "./types.js";
