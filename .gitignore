@@ -137,3 +137,34 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# =============================================================================
+# sage-agent-tempo specific
+# =============================================================================
+
+# Generated build logs (each project creates its own)
+build_log.json
+
+# Generated reports (output, not source)
+reports/
+*.excalidraw
+dashboard.html
+executive-summary.html
+executive-summary.pdf
+
+# Test fixture JSONL files that are large / generated
+# (small hand-crafted fixtures in tests/fixtures/ ARE committed)
+tests/fixtures/generated/
+*.generated.jsonl
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.sublime-project
+*.sublime-workspace
