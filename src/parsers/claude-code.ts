@@ -143,6 +143,17 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
   const raw = readFileSync(absPath, "utf-8");
   const records = parseLines(raw);
 
+  // The filename (without extension) is the canonical sessionId for main sessions.
+  // In continuation sessions, the JSONL contains inherited parent records
+  // with different sessionIds — filter those out to avoid double-counting.
+  // Subagent files (agent-*.jsonl) use the parent's sessionId in records,
+  // so we don't apply filename filtering to them.
+  const fileName = absPath.split("/").pop()?.replace(/\.jsonl$/, "") ?? "";
+  const isSubagentFile = fileName.startsWith("agent-");
+  // Only apply sessionId filtering when the filename looks like a UUID (real CC session files)
+  const isUuidFilename = /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(fileName);
+  const canonicalSessionId = (!isSubagentFile && isUuidFilename) ? fileName : undefined;
+
   const seenUuids = new Set<string>();
   const turns: NormalizedTurn[] = [];
 
@@ -154,13 +165,22 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
     // Only process assistant messages
     if (record.type !== "assistant") continue;
 
+    // For main session files: skip inherited parent records (different sessionId)
+    if (canonicalSessionId && record.sessionId && record.sessionId !== canonicalSessionId) {
+      continue;
+    }
+
     // Deduplicate by uuid
     if (record.uuid) {
       if (seenUuids.has(record.uuid)) continue;
       seenUuids.add(record.uuid);
     }
 
-    turns.push(recordToTurn(record, "unknown"));
+    // For subagent files, use the agent ID from the filename as a pseudo-sessionId
+    // so subagent turns get their own session, not merged with the parent
+    const sessionId = isSubagentFile ? fileName : (record.sessionId ?? "unknown");
+
+    turns.push(recordToTurn(record, sessionId));
   }
 
   return turns;
