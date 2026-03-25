@@ -1,6 +1,6 @@
 {
   "name": "sage-agent-tempo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Reusable skill for tracking what AI agents build, how long it takes, and what it costs",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,8 +15,20 @@
     "test:coverage": "vitest run --coverage",
     "lint": "tsc --noEmit"
   },
-  "keywords": ["claude-code", "ai", "audit", "tokens", "skill"],
+  "keywords": [
+    "claude-code",
+    "ai",
+    "audit",
+    "tokens",
+    "skill"
+  ],
   "license": "MIT",
+  "files": [
+    "dist",
+    "src/hooks/stop-hook.sh",
+    "SKILL.md",
+    "README.md"
+  ],
   "engines": {
     "node": ">=18"
   },
@@ -25,13 +37,10 @@
     "yaml": "^2.6.0",
     "zod": "^3.24.0"
   },
-  "optionalDependencies": {
-    "@swiftlysingh/excalidraw-cli": "^0.1.0"
-  },
   "devDependencies": {
     "@types/node": "^20.17.0",
+    "@vitest/coverage-v8": "^2.1.0",
     "typescript": "^5.7.0",
-    "vitest": "^2.1.0",
-    "@vitest/coverage-v8": "^2.1.0"
+    "vitest": "^2.1.0"
   }
 }

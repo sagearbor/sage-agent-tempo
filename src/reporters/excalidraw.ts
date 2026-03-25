@@ -309,32 +309,16 @@ export function generateTimelineDiagram(buildLog: BuildLog): object {
 // ── File Writer ──────────────────────────────────────────────────
 
 /**
- * Attempt to convert an .excalidraw file to PNG using excalidraw-cli.
- * This is optional — if the package is not installed or conversion fails,
- * a warning is logged and the .excalidraw file remains the primary output.
- */
-async function tryConvertToPng(excalidrawPath: string): Promise<void> {
-  try {
-    const { convertToPNG } = await import("@swiftlysingh/excalidraw-cli");
-    const pngPath = excalidrawPath.replace(/\.excalidraw$/, ".png");
-    await convertToPNG(excalidrawPath, pngPath, { scale: 2 });
-    console.log(`PNG exported: ${pngPath}`);
-  } catch {
-    console.warn(
-      `PNG export skipped for ${excalidrawPath} — install @swiftlysingh/excalidraw-cli for PNG support`,
-    );
-  }
-}
-
-/**
  * Write both architecture and timeline Excalidraw files to the output
- * directory, creating it if it does not exist. Optionally generates
- * PNG versions if @swiftlysingh/excalidraw-cli is installed.
+ * directory, creating it if it does not exist.
+ *
+ * To convert to PNG, open the .excalidraw files in excalidraw.com
+ * or ask Claude Code to render them.
  */
-export async function writeExcalidrawFiles(
+export function writeExcalidrawFiles(
   buildLog: BuildLog,
   outputDir: string,
-): Promise<void> {
+): void {
   mkdirSync(outputDir, { recursive: true });
 
   const archPath = join(outputDir, "architecture.excalidraw");
@@ -344,10 +328,4 @@ export async function writeExcalidrawFiles(
   const timelinePath = join(outputDir, "timeline.excalidraw");
   const timeline = generateTimelineDiagram(buildLog);
   writeFileSync(timelinePath, JSON.stringify(timeline, null, 2), "utf-8");
-
-  // Attempt PNG export (non-blocking, best-effort)
-  await Promise.allSettled([
-    tryConvertToPng(archPath),
-    tryConvertToPng(timelinePath),
-  ]);
 }

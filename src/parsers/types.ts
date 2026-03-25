@@ -56,7 +56,7 @@ export type NormalizedTurn = z.infer<typeof NormalizedTurnSchema>;
 
 export const SessionSummarySchema = z.object({
   sessionId: z.string(),
-  agent: z.enum(["claude-code", "codex", "unknown"]),
+  agent: z.enum(["claude-code", "codex", "gemini", "unknown"]),
   startedAt: z.string().datetime(),
   endedAt: z.string().datetime(),
   durationMinutes: z.number(),

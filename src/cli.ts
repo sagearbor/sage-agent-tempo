@@ -2,15 +2,18 @@
 
 import { Command } from "commander";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, dirname, resolve } from "node:path";
+import { archivePrevious } from "./utils/archive.js";
 import { parseChecklist } from "./collectors/checklist.js";
 import { parseAuto } from "./parsers/index.js";
 import { correlate } from "./correlator/index.js";
+import { inferWorkBlocks } from "./correlator/auto-infer.js";
 import { getCommitsSince } from "./collectors/git.js";
 import { writeDashboard } from "./reporters/html-dashboard.js";
 import { writeExecutiveSummary } from "./reporters/executive-summary.js";
 import { writeExcalidrawFiles } from "./reporters/excalidraw.js";
-import type { BuildLog } from "./parsers/types.js";
+import { collapseChecklist } from "./commands/collapse.js";
+import type { BuildLog, ParsedChecklist } from "./parsers/types.js";
 
 const program = new Command();
 
@@ -26,7 +29,7 @@ program
 program
   .command("parse")
   .description("Run parser + correlator, write build_log.json")
-  .option("--agent <agent>", "Agent type (claude-code, codex)")
+  .option("--agent <agent>", "Agent type (claude-code, codex, gemini)")
   .option(
     "--checklist <path>",
     "Path to developer_checklist.yaml",
@@ -34,16 +37,27 @@ program
   )
   .option("--output <path>", "Output path for build_log.json", "build_log.json")
   .option("--session-dir <path>", "Override session directory")
+  .option("--no-archive", "Skip archiving previous build_log.json")
   .action(async (opts) => {
     try {
+      let checklist: ParsedChecklist | undefined;
       const checklistPath = resolve(opts.checklist);
-      if (!existsSync(checklistPath)) {
+
+      if (existsSync(checklistPath)) {
+        console.log("Parsing checklist...");
+        checklist = parseChecklist(checklistPath);
+      } else if (opts.checklist !== "developer_checklist.yaml") {
+        // User explicitly specified a path that doesn't exist — that's an error
         console.error(`Checklist not found: ${checklistPath}`);
         process.exit(1);
+      } else {
+        console.log(
+          "No checklist found — inferring work blocks from session data",
+        );
+        console.log(
+          "  Tip: Run 'sage-agent-tempo init' to create a checklist for better tracking.",
+        );
       }
-
-      console.log("Parsing checklist...");
-      const checklist = parseChecklist(checklistPath);
 
       console.log("Parsing session files...");
       const sessions = await parseAuto({
@@ -60,7 +74,21 @@ program
       console.log("Correlating data...");
       const buildLog = correlate({ sessions, checklist, commits });
 
+      if (!checklist) {
+        console.log(
+          `  Inferred ${buildLog.checklist.items.length} work block(s) from session data.`,
+        );
+      }
+
       const outputPath = resolve(opts.output);
+
+      if (opts.archive !== false) {
+        archivePrevious(
+          [outputPath],
+          join(dirname(outputPath), "build_log.archive"),
+        );
+      }
+
       writeFileSync(outputPath, JSON.stringify(buildLog, null, 2));
       console.log(`Build log written to ${outputPath}`);
     } catch (err) {
@@ -81,6 +109,7 @@ program
   )
   .option("--output-dir <dir>", "Output directory for reports", "reports")
   .option("--input <path>", "Path to build_log.json", "build_log.json")
+  .option("--no-archive", "Skip archiving previous reports")
   .action(async (opts) => {
     try {
       const inputPath = resolve(opts.input);
@@ -96,6 +125,24 @@ program
 
       const format = opts.format;
 
+      if (opts.archive !== false) {
+        const reportFiles = [
+          ...(format === "all" || format === "dashboard"
+            ? [join(outputDir, "dashboard.html")]
+            : []),
+          ...(format === "all" || format === "executive"
+            ? [join(outputDir, "executive-summary.html")]
+            : []),
+          ...(format === "all" || format === "excalidraw"
+            ? [
+                join(outputDir, "architecture.excalidraw"),
+                join(outputDir, "timeline.excalidraw"),
+              ]
+            : []),
+        ];
+        archivePrevious(reportFiles, join(outputDir, "archive"));
+      }
+
       if (format === "all" || format === "dashboard") {
         const dashPath = join(outputDir, "dashboard.html");
         writeDashboard(buildLog, dashPath);
@@ -109,7 +156,7 @@ program
       }
 
       if (format === "all" || format === "excalidraw") {
-        await writeExcalidrawFiles(buildLog, outputDir);
+        writeExcalidrawFiles(buildLog, outputDir);
         console.log(`Excalidraw diagrams written to ${outputDir}`);
       }
 
@@ -127,7 +174,7 @@ program
   .description("Best-effort log from old session files")
   .option("--since <date>", "Start date (ISO format)", "2026-01-01")
   .option("--until <date>", "End date (ISO format)")
-  .option("--agent <agent>", "Agent type (claude-code, codex)")
+  .option("--agent <agent>", "Agent type (claude-code, codex, gemini)")
   .option("--output <path>", "Output path", "build_log.json")
   .action(async (opts) => {
     try {
@@ -209,14 +256,95 @@ program
   .command("init")
   .description("Scaffold a developer_checklist.yaml template")
   .option("--project <name>", "Project name", "my-project")
-  .action((opts) => {
+  .option(
+    "--from-sessions",
+    "Auto-generate checklist from past session data",
+    false,
+  )
+  .option("--agent <agent>", "Agent type for --from-sessions (claude-code, codex)")
+  .option("--session-dir <path>", "Override session directory for --from-sessions")
+  .action(async (opts) => {
     const outputPath = resolve("developer_checklist.yaml");
     if (existsSync(outputPath)) {
       console.error("developer_checklist.yaml already exists. Aborting.");
       process.exit(1);
     }
 
-    const template = `project: ${opts.project}
+    let template: string;
+
+    if (opts.fromSessions) {
+      // Auto-generate from past session data
+      console.log("Scanning past session data...");
+      const sessions = await parseAuto({
+        agent: opts.agent,
+        sessionDir: opts.sessionDir,
+      });
+
+      if (sessions.length === 0) {
+        console.log("No sessions found. Creating default template instead.");
+        template = generateDefaultTemplate(opts.project);
+      } else {
+        console.log(`Found ${sessions.length} session(s). Inferring work blocks...`);
+        const commits = getCommitsSince(
+          new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+        );
+        const inferred = inferWorkBlocks(sessions, commits);
+
+        // Group items by phase
+        const phaseGroups = new Map<string, typeof inferred.items>();
+        for (const item of inferred.items) {
+          if (!phaseGroups.has(item.phase)) {
+            phaseGroups.set(item.phase, []);
+          }
+          phaseGroups.get(item.phase)!.push(item);
+        }
+
+        // Build YAML from inferred blocks
+        let yaml = `project: ${opts.project}\n`;
+        yaml += `description: >\n  Auto-generated from ${sessions.length} past session(s). Review and customize.\n\n`;
+        yaml += `phases:\n`;
+
+        let phaseIdx = 0;
+        for (const [phaseKey, phaseItems] of phaseGroups) {
+          phaseIdx++;
+          yaml += `  - id: phase-${phaseIdx}\n`;
+          yaml += `    name: "${phaseItems[0]?.phaseName ?? `Phase ${phaseIdx}`}"\n`;
+          yaml += `    items:\n`;
+
+          for (const item of phaseItems) {
+            yaml += `      - id: "${item.id}"\n`;
+            yaml += `        title: "${item.title.replace(/"/g, '\\"')}"\n`;
+            if (item.tags.length > 0) {
+              yaml += `        tags: [${item.tags.join(", ")}]\n`;
+            }
+          }
+          yaml += `\n`;
+        }
+
+        // Add a placeholder future phase
+        yaml += `  - id: next\n`;
+        yaml += `    name: Next Steps\n`;
+        yaml += `    items:\n`;
+        yaml += `      - id: "${phaseIdx + 1}.1"\n`;
+        yaml += `        title: "TODO: Add your next planned work item"\n`;
+        yaml += `        tags: [backend]\n`;
+
+        template = yaml;
+        console.log(
+          `Pre-populated checklist with ${inferred.items.length} inferred work block(s).`,
+        );
+      }
+    } else {
+      template = generateDefaultTemplate(opts.project);
+    }
+
+    writeFileSync(outputPath, template);
+    console.log(`Created ${outputPath}`);
+    console.log("Edit it with your project's phases and checklist items.");
+  });
+
+function generateDefaultTemplate(projectName: string): string {
+  return `project: ${projectName}
 description: >
   Brief description of what this project does.
 
@@ -238,10 +366,42 @@ phases:
         depends_on: ["1.1"]
         acceptance: Feature works end-to-end
 `;
+}
 
-    writeFileSync(outputPath, template);
-    console.log(`Created ${outputPath}`);
-    console.log("Edit it with your project's phases and checklist items.");
+// ── collapse ──────────────────────────────────────────────────────
+
+program
+  .command("collapse")
+  .description("Reduce completed checklist items to one-line stubs")
+  .argument("[path]", "Path to developer_checklist.yaml", "developer_checklist.yaml")
+  .option("--input <path>", "Path to build_log.json", "build_log.json")
+  .option("--dry-run", "Show what would be collapsed without writing", false)
+  .action((checklistPath: string, opts: { input: string; dryRun: boolean }) => {
+    try {
+      const fullChecklistPath = resolve(checklistPath);
+      const buildLogPath = resolve(opts.input);
+
+      if (!existsSync(fullChecklistPath)) {
+        console.error(`Checklist not found: ${fullChecklistPath}`);
+        process.exit(1);
+      }
+
+      const result = collapseChecklist(fullChecklistPath, buildLogPath, opts.dryRun);
+
+      if (opts.dryRun) {
+        console.log(`[dry-run] Would collapse ${result.collapsed} of ${result.total} items (${result.remaining} remaining active)`);
+        if (result.collapsedIds.length > 0) {
+          for (const id of result.collapsedIds) {
+            console.log(`  - ${id}`);
+          }
+        }
+      } else {
+        console.log(`Collapsed ${result.collapsed} of ${result.total} items (${result.remaining} remaining active)`);
+      }
+    } catch (err) {
+      console.error("Collapse failed:", (err as Error).message);
+      process.exit(1);
+    }
   });
 
 program.parse();
