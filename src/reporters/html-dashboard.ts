@@ -124,6 +124,30 @@ function archBreakdownData(breakdown: Record<string, { tokens: number; files: nu
   });
 }
 
+function phaseBreakdownData(items: ChecklistItemResult[], totalCost: number, totalTokens: number): string {
+  const costPerToken = totalTokens > 0 ? totalCost / totalTokens : 0;
+  const byPhase: Record<string, { tokens: number; durationMinutes: number; cost: number }> = {};
+
+  for (const item of items) {
+    const phase = item.phase || "unknown";
+    if (!byPhase[phase]) {
+      byPhase[phase] = { tokens: 0, durationMinutes: 0, cost: 0 };
+    }
+    const itemTokens = item.tokens?.total ?? 0;
+    byPhase[phase].tokens += itemTokens;
+    byPhase[phase].durationMinutes += item.durationMinutes ?? 0;
+    byPhase[phase].cost += itemTokens * costPerToken;
+  }
+
+  const entries = Object.entries(byPhase).filter(([, v]) => v.tokens > 0 || v.durationMinutes > 0);
+  return JSON.stringify({
+    labels: entries.map(([k]) => k),
+    costs: entries.map(([, v]) => Math.round(v.cost * 100) / 100),
+    durations: entries.map(([, v]) => Math.round(v.durationMinutes * 10) / 10),
+    colors: entries.map(([k]) => k.toLowerCase() === "overhead" ? "#bab0ac" : phaseColor(k)),
+  });
+}
+
 function testResultsData(items: ChecklistItemResult[]): string {
   let passed = 0;
   let failed = 0;
@@ -161,6 +185,7 @@ export function generateDashboard(buildLog: BuildLog): string {
   const burn = tokenBurnData(timeline);
   const cost = costPerItemData(checklist.items, summary.totalEstimatedCostUsd, summary.totalTokens);
   const arch = archBreakdownData(summary.architectureBreakdown);
+  const phases = phaseBreakdownData(checklist.items, summary.totalEstimatedCostUsd, summary.totalTokens);
   const tests = testResultsData(checklist.items);
 
   return `<!DOCTYPE html>
@@ -251,7 +276,7 @@ export function generateDashboard(buildLog: BuildLog): string {
 
 <div class="header">
   <h1>${escapeHtml(project)}</h1>
-  <div class="subtitle">Generated ${escapeHtml(dateStr)} &middot; Agent: ${escapeHtml(buildLog.agent)} &middot; Session: ${escapeHtml(buildLog.sessionId)}</div>
+  <div class="subtitle">Generated ${escapeHtml(dateStr)} &middot; Agent: ${escapeHtml(buildLog.agent)} &middot; ${buildLog.sessionId.includes(",") ? `${buildLog.sessionId.split(",").length} sessions` : `Session: ${escapeHtml(buildLog.sessionId.slice(0, 12))}…`}</div>
 </div>
 
 <div class="kpi-row">
@@ -295,6 +320,10 @@ export function generateDashboard(buildLog: BuildLog): string {
     <div id="archBreakdown" class="chart"></div>
   </div>
   <div class="card">
+    <h2>Phase Breakdown</h2>
+    <div id="phaseBreakdown" class="chart"></div>
+  </div>
+  <div class="card full-width">
     <h2>Test Results</h2>
     <div id="testResults" class="chart"></div>
   </div>
@@ -411,6 +440,28 @@ export function generateDashboard(buildLog: BuildLog): string {
     }), config);
   } else {
     ${noDataPlaceholder("archBreakdown")}
+  }
+
+  // ── Phase Breakdown ──────────────────────────────────────────
+  var phaseData = ${phases};
+  if (phaseData.labels.length > 0) {
+    var phaseText = phaseData.labels.map(function(label, i) {
+      return label + '<br>$' + phaseData.costs[i].toFixed(2) + ' · ' + phaseData.durations[i] + 'm';
+    });
+    Plotly.newPlot('phaseBreakdown', [{
+      type: 'pie',
+      labels: phaseData.labels,
+      values: phaseData.costs,
+      hole: 0.45,
+      text: phaseText,
+      textinfo: 'label+percent',
+      hovertemplate: '%{label}<br>Cost: $%{value:.2f}<br>%{percent}<extra></extra>',
+      marker: { colors: phaseData.colors },
+    }], Object.assign({}, layout, {
+      showlegend: false,
+    }), config);
+  } else {
+    ${noDataPlaceholder("phaseBreakdown")}
   }
 
   // ── Test Results ──────────────────────────────────────────────

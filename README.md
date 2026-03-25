@@ -4,6 +4,27 @@ Reusable skill for tracking what AI agents build, how long it takes, and what it
 
 A Claude Code skill (and CLI tool) that creates a complete audit trail of AI agent development work — tracking what was built, how long each step took, what it cost in tokens, and whether the tests pass. Get C-suite-ready reports showing exactly how AI built your software.
 
+## Quick start (Claude Code)
+
+> Also works with [Gemini CLI and Codex](#supported-agents). See [CLI reference](#cli-reference) for all commands.
+
+```bash
+# 1. Install skill globally (one time — teaches Claude Code how to track builds)
+mkdir -p ~/.claude/skills/sage-agent-tempo
+curl -o ~/.claude/skills/sage-agent-tempo/SKILL.md https://raw.githubusercontent.com/sagearbor/sage-agent-tempo/main/SKILL.md
+
+# 2. Start Claude Code and activate tracking
+cd your-project && claude
+# Say: "use sage-agent-tempo" or "track this build"
+# The agent auto-creates a developer_checklist.yaml and announces progress as it works
+
+# 3. Generate reports anytime (reads Claude Code session files from ~/.claude/)
+npx sage-agent-tempo parse --agent claude-code   # Parse session data → build_log.json
+npx sage-agent-tempo report --format all          # Generate dashboard, executive summary, diagrams
+# Open reports/dashboard.html in a browser
+```
+
+
 ## The problem
 
 You ask Claude Code (or Codex) to build something from a checklist. 45 minutes later it's done. But you can't answer basic questions: How much did each feature cost in tokens? Which checklist items took longest? How many tests were created? What percentage was backend vs frontend? Did the agent get stuck anywhere?
@@ -190,44 +211,30 @@ Every event in the log follows this structure:
 }
 ```
 
-## Usage
+## CLI reference
 
-### As a Claude Code skill (primary use case)
+### No skill? Works anyway
 
-```bash
-# Add to your project's skills
-mkdir -p .claude/skills
-# Copy or symlink sage-agent-tempo skill files
-
-# Create your checklist
-cp templates/developer_checklist.yaml ./developer_checklist.yaml
-# Edit with your project's tasks
-
-# The Stop hook auto-triggers after each agent session
-# When you're ready for reports:
-npx sage-agent-tempo report
-```
-
-### As a CLI tool
+You can skip the skill and just run the CLI. Without a checklist, the tool auto-infers work blocks from session data:
 
 ```bash
-# Install
-npm install -g sage-agent-tempo
-
-# Generate build log from existing session data
-sage-agent-tempo parse --agent claude-code --checklist developer_checklist.yaml
-
-# Generate all reports
-sage-agent-tempo report --format all
-
-# Generate specific report
-sage-agent-tempo report --format dashboard
-sage-agent-tempo report --format executive
-sage-agent-tempo report --format excalidraw
-
-# Backfill from old sessions (best-effort, no checklist correlation)
-sage-agent-tempo backfill --since 2026-03-01
+npx sage-agent-tempo parse --agent claude-code
+npx sage-agent-tempo report --format all
 ```
+
+### All commands
+
+```bash
+npx sage-agent-tempo --help              # Show all commands
+npx sage-agent-tempo parse [options]     # Parse sessions → build_log.json
+npx sage-agent-tempo report [options]    # Generate reports from build_log.json
+npx sage-agent-tempo collapse            # Shrink completed checklist items
+npx sage-agent-tempo validate [path]     # Validate a developer_checklist.yaml
+npx sage-agent-tempo init [options]      # Scaffold a new checklist
+npx sage-agent-tempo backfill [options]  # Best-effort log from old sessions
+```
+
+Reports are auto-archived before regeneration. Previous reports move to `reports/archive/YYYYMMDD-HHMM/`. Use `--no-archive` to skip.
 
 ## The developer_checklist.yaml format
 
@@ -262,25 +269,28 @@ Tags drive the architecture breakdown in reports. Supported tags: `backend`, `fr
 
 ## Supported agents
 
-| Agent | Session files | Parser status |
-|-------|--------------|---------------|
-| Claude Code | `~/.claude/projects/<path>/<session>.jsonl` | Primary target |
-| OpenAI Codex | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Secondary target |
+| Agent | Session files | Status |
+|-------|--------------|--------|
+| Claude Code | `~/.claude/projects/<path>/<session>.jsonl` | Supported |
+| Google Gemini CLI | `~/.gemini/tmp/<hash>/chats/session-*.jsonl` | Supported |
+| OpenAI Codex | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Supported |
 | Future agents | TBD | Pluggable parser interface |
+
+Auto-detection: if you omit `--agent`, the tool checks which agent directories exist and parses all of them.
 
 ## Report outputs
 
-### Executive summary (PDF/DOCX)
+### Interactive HTML dashboard (`reports/dashboard.html`)
 
-A document non-technical stakeholders can actually open, containing a one-page overview (total cost, duration, completion rate, test pass rate), per-phase breakdown with mini bar charts, top 3 most expensive checklist items, and architecture distribution.
+A single `.html` file (no server needed) with Gantt chart, token burn timeline, cost-per-item bar chart, architecture donut chart, and test results. Uses Plotly.js via CDN.
 
-### Interactive HTML dashboard
+### Executive summary (`reports/executive-summary.html`)
 
-A single `.html` file (no server needed) with: Gantt chart showing checklist item timelines color-coded by phase, token burn rate over time, cost per checklist item (bar chart), architecture breakdown (donut chart), and test results summary. Uses Plotly.js bundled inline.
+Print-friendly HTML document for non-technical stakeholders. Styled for `@media print` — Cmd+P to save as PDF.
 
-### Excalidraw diagrams
+### Excalidraw diagrams (`reports/*.excalidraw`)
 
-Architecture breakdown and timeline diagrams as `.excalidraw` JSON files, compatible with the `excalidraw-diagram-generator` Claude Code skill and excalidraw.com. To convert to PNG, open in excalidraw.com or ask Claude Code to render them.
+Architecture breakdown and timeline diagrams as `.excalidraw` JSON files. Open in excalidraw.com or use the `excalidraw-diagram-generator` Claude Code skill for enhanced rendering.
 
 ## Requirements
 
@@ -290,7 +300,7 @@ Architecture breakdown and timeline diagrams as `.excalidraw` JSON files, compat
 
 ## How it handles the hard parts
 
-**Correlating turns to checklist items**: The parser looks for checklist item IDs or titles mentioned in user prompts and agent responses. When the agent says "Now working on 2.1" or "Moving on to the data ingestion pipeline," the correlator assigns subsequent turns to that item. Falls back to timestamp-based heuristics if no explicit mentions are found.
+**Correlating turns to checklist items**: Three strategies in priority order: (1) Explicit mention — agent says "Starting item 2.1". (2) File-path match — touching `src/parsers/claude-code.ts` matches the parser checklist item via acceptance criteria. (3) Temporal fallback — assign to the most recently active item for that session. Parallel agents get independent tracking to avoid cross-contamination. Unmatched turns go to a "Planning & overhead" bucket.
 
 **Cost estimation on Pro/Max subscriptions**: Token counts are exact (from session files). Dollar costs are API-equivalent estimates via LiteLLM pricing data — useful for relative comparison ("feature A cost 3x more than feature B") even if you're not paying per-token.
 

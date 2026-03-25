@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { claudeCodeParser, parseProjectSessions } from "./claude-code.js";
 import { codexParser, parseAllSessions as parseAllCodexSessions } from "./codex.js";
@@ -53,8 +53,7 @@ export async function parseAuto(
     if (agent === "unknown") continue;
 
     if (agent === "claude-code") {
-      const dir =
-        opts.sessionDir || join(homedir(), ".claude", "projects");
+      const dir = opts.sessionDir || findClaudeProjectDir();
       const sessions = await parseProjectSessions(dir);
       allSessions.push(...sessions);
     } else if (agent === "codex") {
@@ -69,6 +68,25 @@ export async function parseAuto(
   }
 
   return allSessions;
+}
+
+/**
+ * Find the Claude Code project directory for the current working directory.
+ * Claude Code stores sessions at ~/.claude/projects/<slug>/ where the slug
+ * is the CWD path with / replaced by - and prefixed with -.
+ * Falls back to scanning all projects if the specific directory isn't found.
+ */
+function findClaudeProjectDir(): string {
+  const cwd = resolve(process.cwd());
+  const slug = cwd.replace(/\//g, "-");
+  const projectDir = join(homedir(), ".claude", "projects", slug);
+
+  if (existsSync(projectDir)) {
+    return projectDir;
+  }
+
+  // Fallback: scan all projects (less accurate but works if cwd changed)
+  return join(homedir(), ".claude", "projects");
 }
 
 export { claudeCodeParser } from "./claude-code.js";
