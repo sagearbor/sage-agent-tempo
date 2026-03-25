@@ -1,0 +1,37 @@
+project: test-project
+description: A sample checklist for testing
+
+phases:
+  - id: phase-1
+    name: Setup
+    description: Initial project setup
+    items:
+      - id: setup-repo
+        title: Initialize repository
+        tags: [config]
+        priority: critical
+        depends_on: []
+        acceptance: Repository is initialized with correct structure
+      - id: setup-ci
+        title: Configure CI pipeline
+        tags: [config, tools]
+        priority: high
+        depends_on: [setup-repo]
+        acceptance: CI pipeline runs on push
+
+  - id: phase-2
+    name: Implementation
+    description: Core feature development
+    items:
+      - id: impl-parser
+        title: Build the JSONL parser
+        tags: [backend]
+        priority: critical
+        depends_on: [setup-repo]
+        acceptance: Parser correctly reads JSONL files
+      - id: impl-tests
+        title: Write unit tests for parser
+        tags: [tests]
+        priority: high
+        depends_on: [impl-parser]
+        acceptance: All parser tests pass
