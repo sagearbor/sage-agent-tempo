@@ -1,0 +1,561 @@
+# =============================================================================
+# AI Dev Tracker — Developer Checklist
+# =============================================================================
+# This checklist is used by AI agents (Claude Code, Codex) to build the
+# sage-agent-tempo project itself. It also serves as a real-world test case
+# for the tool — we're tracking our own build with the tool we're building.
+#
+# Usage:
+#   - Assign phases or individual items to agents
+#   - Agents should announce "Starting item X.Y" when beginning work
+#   - The tracker will correlate agent turns to these items
+#
+# Tags determine the architecture breakdown in reports:
+#   backend, frontend, mcp, tools, tests, config, docs, data
+# =============================================================================
+
+project: sage-agent-tempo
+description: >
+  Reusable Claude Code skill and CLI tool for auditing AI agent development.
+  Tracks tokens, time, cost, tests, and architecture per checklist item.
+  Produces C-suite-ready reports from build data.
+
+# Global settings for agents working on this project
+agent_instructions:
+  language: TypeScript
+  runtime: Node.js 18+
+  package_manager: npm
+  test_framework: vitest
+  style: >
+    Functional style preferred. No classes unless necessary.
+    Use Zod for runtime validation. Use commander for CLI.
+    All file paths should use path.join() for cross-platform support.
+
+# =============================================================================
+# PHASE 1: Foundation
+# =============================================================================
+# Goal: Working project skeleton with core types, build tooling, and the
+# schema that everything else depends on.
+# Estimated effort: ~30 minutes
+# =============================================================================
+
+phases:
+
+  - id: foundation
+    name: Foundation
+    description: Project skeleton, core types, and schemas
+
+    items:
+      - id: "1.1"
+        title: Initialize project scaffolding
+        tags: [config]
+        priority: critical
+        acceptance: |
+          - package.json with name "sage-agent-tempo", TypeScript, vitest, commander, zod, plotly.js
+          - tsconfig.json targeting ES2022, NodeNext module resolution
+          - src/ directory structure matching README.md project structure
+          - .gitignore covering node_modules, dist, *.jsonl test fixtures
+          - npm run build compiles without errors
+          - npm run test runs (even if no tests yet)
+        notes: >
+          Create CLAUDE.md at project root with instructions for agents
+          working on subsequent phases. Include the build_log.json schema
+          location and testing conventions.
+
+      - id: "1.2"
+        title: Define core TypeScript types and Zod schemas
+        tags: [backend]
+        priority: critical
+        depends_on: ["1.1"]
+        acceptance: |
+          - src/parsers/types.ts exports:
+            - AgentEvent (union type: tool_call | assistant_message | user_message | system)
+            - NormalizedTurn (agent-agnostic: timestamp, tokens, tool_name, files_touched)
+            - SessionSummary (session_id, turns, total_tokens, duration, model)
+          - src/schemas/ contains:
+            - build_log.schema.json (JSON Schema matching README spec)
+            - checklist.schema.json (validates developer_checklist.yaml)
+          - Zod schemas for runtime validation of both
+          - All types exported from src/index.ts
+          - Unit tests for Zod schema validation (valid + invalid inputs)
+        notes: >
+          These types are the contract between parsers and everything downstream.
+          Get them right — changing them later means touching every file.
+
+      - id: "1.3"
+        title: Build the developer_checklist.yaml parser
+        tags: [backend]
+        priority: critical
+        depends_on: ["1.2"]
+        acceptance: |
+          - src/collectors/checklist.ts exports:
+            - parseChecklist(yamlPath: string): ParsedChecklist
+            - validateChecklist(data: unknown): validates against Zod schema
+          - Handles: phases, items, depends_on references, tags
+          - Returns flat list of items with resolved phase names
+          - Throws clear errors for invalid YAML or missing required fields
+          - Unit tests with valid checklist, missing fields, circular deps
+        notes: >
+          Use yaml package for parsing. Validate with Zod, not manual checks.
+
+# =============================================================================
+# PHASE 2: Parsers
+# =============================================================================
+# Goal: Read raw JSONL session files from Claude Code and Codex, extract
+# per-turn token counts, tool calls, timestamps, and file operations.
+# These parsers are the data foundation for everything.
+# Estimated effort: ~45 minutes
+# =============================================================================
+
+  - id: parsers
+    name: Agent Parsers
+    description: Parse JSONL session files into normalized events
+
+    items:
+      - id: "2.1"
+        title: Build Claude Code JSONL parser
+        tags: [backend]
+        priority: critical
+        depends_on: ["1.2"]
+        acceptance: |
+          - src/parsers/claude-code.ts exports:
+            - parseSession(jsonlPath: string): NormalizedTurn[]
+            - parseProjectSessions(projectDir: string): SessionSummary[]
+          - Correctly extracts from each assistant message:
+            - timestamp, sessionId, uuid, parentUuid
+            - inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens
+            - model name
+            - tool_use blocks (tool name, tool input including file_path)
+            - tool_result blocks
+          - Handles:
+            - compact_boundary records (skip, don't double-count)
+            - isCompactSummary records (skip synthetic summaries)
+            - Multi-session continuations (parentUuid chains across files)
+            - Subagent sessions (parentToolUseId linking)
+            - Duplicate UUID deduplication
+          - Unit tests using fixture JSONL files (create 3+ realistic fixtures)
+        notes: >
+          The JSONL format is documented at:
+          https://blog.fsck.com/releases/2026/02/22/claude-code-session-continuation/
+          Key: each line is a JSON object with type field (user/assistant/system).
+          Assistant messages have message.content array with text/tool_use/thinking blocks.
+          Token fields are on the assistant record itself, not inside content blocks.
+          IMPORTANT: handle the case where session files have records from multiple
+          sessionIds (continuation sessions copy parent records as prefix).
+
+      - id: "2.2"
+        title: Build Codex CLI JSONL parser
+        tags: [backend]
+        priority: high
+        depends_on: ["1.2"]
+        acceptance: |
+          - src/parsers/codex.ts exports:
+            - parseSession(jsonlPath: string): NormalizedTurn[]
+            - parseAllSessions(codexHomeDir: string): SessionSummary[]
+          - Correctly handles Codex-specific format:
+            - Sessions at ~/.codex/sessions/YYYY/MM/DD/*.jsonl
+            - event_msg records where payload.type === "token_count"
+            - Cumulative token totals (must compute deltas per turn)
+            - last_token_usage field for delta calculation
+          - Falls back gracefully if Codex is not installed
+          - Unit tests using fixture files
+        notes: >
+          Codex tokens are cumulative, not per-turn. The delta calculation is:
+          current.input_tokens - previous.input_tokens = this turn's input tokens.
+          When last_token_usage is absent, treat entire count as the first delta.
+          See @ccusage/codex source for reference implementation.
+
+      - id: "2.3"
+        title: Build parser registry and auto-detection
+        tags: [backend]
+        priority: high
+        depends_on: ["2.1", "2.2"]
+        acceptance: |
+          - src/parsers/index.ts exports:
+            - detectAgent(): "claude-code" | "codex" | "unknown"
+            - getParser(agent: string): AgentParser interface
+            - parseAuto(opts): auto-detects agent and parses
+          - AgentParser interface: { parseSession, findSessions }
+          - Detection logic:
+            - Check for ~/.claude/projects/ → claude-code
+            - Check for ~/.codex/sessions/ → codex
+            - Check for both → return both (multi-agent build)
+          - Unit tests for detection logic
+
+# =============================================================================
+# PHASE 3: Collectors
+# =============================================================================
+# Goal: Gather non-token data: git history, test results, and file
+# categorization (backend/frontend/etc based on paths and tags).
+# Estimated effort: ~30 minutes
+# =============================================================================
+
+  - id: collectors
+    name: Data Collectors
+    description: Git integration, test results, file categorization
+
+    items:
+      - id: "3.1"
+        title: Build git collector
+        tags: [backend]
+        priority: high
+        depends_on: ["1.2"]
+        acceptance: |
+          - src/collectors/git.ts exports:
+            - getCommitsSince(since: Date): GitCommit[]
+            - getFilesChanged(commitSha: string): FileChange[]
+            - correlateCommitToTimeRange(commits, startTime, endTime): GitCommit[]
+          - GitCommit type: sha, message, timestamp, author, files_changed[]
+          - FileChange type: path, status (added/modified/deleted), lines_added, lines_deleted
+          - Uses child_process.execSync to run git commands (no library dep)
+          - Handles: not-a-git-repo gracefully, empty repos, merge commits
+          - Unit tests (can use git commands on the test repo itself)
+
+      - id: "3.2"
+        title: Build test results collector
+        tags: [backend]
+        priority: medium
+        depends_on: ["1.2"]
+        acceptance: |
+          - src/collectors/test-results.ts exports:
+            - parseTestOutput(stdout: string, framework: string): TestResults
+            - detectTestFramework(projectDir: string): string
+          - Supports parsing output from: vitest, jest, pytest (tap/json output)
+          - TestResults type: total, passed, failed, skipped, duration_ms, suites[]
+          - Falls back to regex parsing of stdout if JSON output not available
+          - Unit tests with sample outputs from each framework
+
+      - id: "3.3"
+        title: Build file categorizer
+        tags: [backend]
+        priority: medium
+        depends_on: ["1.2"]
+        acceptance: |
+          - src/collectors/categorizer.ts exports:
+            - categorizeFile(filePath: string): ArchitectureTag
+            - categorizeFiles(paths: string[]): Record<ArchitectureTag, string[]>
+          - Default rules (overridable via config):
+            - backend: src/api/**, src/server/**, src/db/**, *.prisma, *.sql
+            - frontend: src/components/**, src/pages/**, *.css, *.html, *.jsx, *.tsx (in component dirs)
+            - mcp: src/mcp/**, mcp.json, .mcp.json
+            - tools: src/tools/**, src/scripts/**
+            - tests: **/*.test.*, **/*.spec.*, __tests__/**
+            - config: *.json (root), *.yaml (root), *.toml, .env*, tsconfig*, package.json
+            - docs: *.md, docs/**, *.txt
+            - data: src/data/**, *.csv, *.jsonl, migrations/**
+          - Respects tags from developer_checklist.yaml as override
+          - Unit tests for each category
+
+# =============================================================================
+# PHASE 4: Correlator
+# =============================================================================
+# Goal: The brain. Join parsed tokens + checklist + git + tests into a
+# single build_log.json. This is the hardest part — getting the
+# checklist-to-turn correlation right.
+# Estimated effort: ~45 minutes
+# =============================================================================
+
+  - id: correlator
+    name: Correlator Engine
+    description: Join all data streams into build_log.json
+
+    items:
+      - id: "4.1"
+        title: Build the turn-to-checklist correlator
+        tags: [backend]
+        priority: critical
+        depends_on: ["2.1", "1.3"]
+        acceptance: |
+          - src/correlator/index.ts exports:
+            - correlate(opts: CorrelateOptions): BuildLog
+          - CorrelateOptions: { sessions: SessionSummary[], checklist: ParsedChecklist,
+              commits: GitCommit[], testResults?: TestResults }
+          - Correlation strategy (in priority order):
+            1. Explicit mention: agent message contains checklist item ID (e.g., "Starting 2.1")
+               or item title (e.g., "Build data ingestion pipeline")
+            2. File-based: if a turn's tool calls touch files that match a checklist
+               item's expected outputs (from acceptance criteria or tags)
+            3. Temporal: assign uncorrelated turns to the most recently started item
+            4. Unmatched: turns that can't be correlated go into an "overhead" bucket
+          - Output matches build_log.json schema exactly
+          - Validates output against JSON Schema before writing
+          - Unit tests: explicit mention, file-based, temporal fallback, multi-session
+
+      - id: "4.2"
+        title: Build timeline event generator
+        tags: [backend]
+        priority: high
+        depends_on: ["4.1"]
+        acceptance: |
+          - src/correlator/timeline.ts exports:
+            - generateTimeline(buildLog: BuildLog): TimelineEvent[]
+          - Emits events: checklist_start, checklist_done, tool_call,
+            test_run, git_commit, session_start, session_end
+          - Events are chronologically sorted
+          - Each event has: type, at (ISO timestamp), and type-specific fields
+          - Timeline is embedded in build_log.json under "timeline" key
+          - Unit tests verify chronological ordering and completeness
+
+      - id: "4.3"
+        title: Build summary statistics generator
+        tags: [backend]
+        priority: high
+        depends_on: ["4.1", "3.3"]
+        acceptance: |
+          - src/correlator/summary.ts exports:
+            - generateSummary(buildLog: BuildLog): BuildSummary
+          - Computes:
+            - Total duration, tokens, estimated cost
+            - Items completed vs total, completion percentage
+            - Tests created/passed/failed
+            - Files created count
+            - Architecture breakdown (tokens + files + duration per tag)
+            - Top 3 most expensive items
+            - Top 3 longest-running items
+          - Summary is embedded in build_log.json under "summary" key
+          - Unit tests with known fixture data, verify arithmetic
+
+# =============================================================================
+# PHASE 5: Report Generators
+# =============================================================================
+# Goal: Three output formats from build_log.json. Each should work
+# independently — given a valid build_log.json, produce the report.
+# Estimated effort: ~60 minutes
+# =============================================================================
+
+  - id: reporters
+    name: Report Generators
+    description: Executive summary, HTML dashboard, Excalidraw diagrams
+
+    items:
+      - id: "5.1"
+        title: Build HTML dashboard generator
+        tags: [frontend]
+        priority: critical
+        depends_on: ["4.1", "4.2", "4.3"]
+        acceptance: |
+          - src/reporters/html-dashboard.ts exports:
+            - generateDashboard(buildLog: BuildLog): string (HTML)
+            - writeDashboard(buildLog: BuildLog, outputPath: string): void
+          - Self-contained single HTML file (no external dependencies at runtime)
+          - Plotly.js bundled inline (CDN link with fallback)
+          - Charts included:
+            - Gantt chart: checklist items as horizontal bars, color-coded by phase
+            - Token burn timeline: line chart of cumulative tokens over time
+            - Cost per item: horizontal bar chart, sorted descending
+            - Architecture breakdown: donut chart (backend/frontend/etc)
+            - Test results: simple pass/fail/skip bar
+          - Header section with project name, date, totals (duration, cost, tests)
+          - Responsive layout (works on desktop and tablet)
+          - Professional styling (clean, not flashy — this goes to executives)
+          - Can be opened by double-clicking the file in any browser
+          - Unit test: generates valid HTML from fixture build_log.json
+
+      - id: "5.2"
+        title: Build executive summary document generator
+        tags: [docs]
+        priority: high
+        depends_on: ["4.3"]
+        acceptance: |
+          - src/reporters/executive-summary.ts exports:
+            - generateExecutiveSummary(buildLog: BuildLog, format: "pdf" | "html"): Buffer
+            - writeExecutiveSummary(buildLog: BuildLog, outputPath: string): void
+          - Sections:
+            - Title page: project name, date, "AI Development Audit Report"
+            - Executive summary (1 paragraph): what was built, how long, total cost
+            - Key metrics table: duration, cost, completion rate, test pass rate
+            - Phase breakdown: each phase with items, status, cost, duration
+            - Architecture distribution: simple text-based breakdown
+            - Recommendations / notes (if any items failed or have warnings)
+          - Output as self-contained HTML (styled for print, can save-as-PDF)
+          - Professional formatting suitable for C-suite audience
+          - Unit test: generates valid output from fixture data
+        notes: >
+          Start with HTML output that's styled for print (@media print).
+          Users can Cmd+P to save as PDF. If we want native PDF later, we
+          can add puppeteer or use the pdf skill — but HTML-first is simpler.
+
+      - id: "5.3"
+        title: Build Excalidraw diagram generator
+        tags: [frontend, docs]
+        priority: medium
+        depends_on: ["4.3"]
+        acceptance: |
+          - src/reporters/excalidraw.ts exports:
+            - generateArchitectureDiagram(buildLog: BuildLog): ExcalidrawFile
+            - generateTimelineDiagram(buildLog: BuildLog): ExcalidrawFile
+            - writeExcalidrawFiles(buildLog: BuildLog, outputDir: string): void
+          - Architecture diagram:
+            - Boxes for each architecture category (backend, frontend, etc)
+            - Size proportional to token usage
+            - File counts as labels
+            - Arrows showing data flow (if inferable)
+          - Timeline diagram:
+            - Horizontal swimlanes per phase
+            - Boxes per checklist item, width proportional to duration
+            - Color-coded by status (done=green, in-progress=yellow, blocked=red)
+          - Output as valid .excalidraw JSON files
+          - Compatible with excalidraw.com and CC excalidraw-diagram-generator skill
+          - Unit test: output validates against Excalidraw JSON schema
+        notes: >
+          Excalidraw JSON format: { type: "excalidraw", version: 2,
+          elements: [...], appState: {...} }. Each element has type
+          (rectangle, text, arrow, line), x, y, width, height, and styling.
+          See https://docs.excalidraw.com/docs/codebase/json-schema
+
+# =============================================================================
+# PHASE 6: Hooks & Skill Integration
+# =============================================================================
+# Goal: Make it work as a drop-in Claude Code skill. Hooks trigger the
+# parser automatically. SKILL.md tells agents how to use it.
+# Estimated effort: ~30 minutes
+# =============================================================================
+
+  - id: integration
+    name: Hooks & Skill Integration
+    description: Claude Code hooks, SKILL.md, CLI
+
+    items:
+      - id: "6.1"
+        title: Build Claude Code Stop hook
+        tags: [tools]
+        priority: high
+        depends_on: ["4.1"]
+        acceptance: |
+          - src/hooks/stop-hook.sh:
+            - Reads JSON from stdin (session_id, transcript_path, cwd)
+            - Runs the parser on the session's JSONL file
+            - Updates build_log.json in the project directory
+            - Runs async (does not block Claude Code)
+            - Exits cleanly on errors (never blocks the agent)
+          - Installation instructions in README
+          - Hook config JSON for .claude/settings.json:
+            { "hooks": { "Stop": [{ "hooks": [{ "type": "command",
+              "command": "path/to/stop-hook.sh", "async": true }] }] } }
+          - Integration test: simulate hook input, verify build_log.json updated
+
+      - id: "6.2"
+        title: Build CLI entry point
+        tags: [tools]
+        priority: high
+        depends_on: ["4.1", "5.1", "5.2", "5.3"]
+        acceptance: |
+          - src/cli.ts using commander:
+            - `sage-agent-tempo parse` — run parser + correlator, write build_log.json
+              Options: --agent, --checklist, --output, --session-dir
+            - `sage-agent-tempo report` — generate reports from build_log.json
+              Options: --format (all|dashboard|executive|excalidraw), --output-dir
+            - `sage-agent-tempo backfill` — best-effort log from old session files
+              Options: --since, --until, --agent
+            - `sage-agent-tempo validate` — validate a developer_checklist.yaml
+            - `sage-agent-tempo init` — scaffold a developer_checklist.yaml template
+          - bin entry in package.json: "sage-agent-tempo": "./dist/cli.js"
+          - Help text for all commands
+          - Integration tests for parse and report commands
+
+      - id: "6.3"
+        title: Write SKILL.md for Claude Code skill usage
+        tags: [docs]
+        priority: high
+        depends_on: ["6.1", "6.2"]
+        acceptance: |
+          - SKILL.md at project root following Claude Code skill conventions:
+            - Frontmatter: name, description, hooks configuration
+            - Instructions for agents: how to announce checklist items,
+              how to trigger reports, where build_log.json lives
+            - Integration with developer_checklist.yaml
+          - CLAUDE.md updated with project-specific agent instructions
+          - Templates directory with example developer_checklist.yaml
+
+      - id: "6.4"
+        title: Write comprehensive documentation
+        tags: [docs]
+        priority: medium
+        depends_on: ["6.2", "6.3"]
+        acceptance: |
+          - README.md is accurate and matches actual implementation
+          - CONTRIBUTING.md with development setup instructions
+          - docs/schema.md documenting build_log.json fields
+          - docs/adding-agents.md guide for adding new agent parsers
+          - All CLI commands have --help text
+          - At least one end-to-end example in docs/examples/
+
+# =============================================================================
+# PHASE 7: Testing & Polish
+# =============================================================================
+# Goal: Comprehensive test coverage, error handling, edge cases.
+# Estimated effort: ~30 minutes
+# =============================================================================
+
+  - id: testing
+    name: Testing & Polish
+    description: Test coverage, error handling, edge cases
+
+    items:
+      - id: "7.1"
+        title: Create realistic test fixtures
+        tags: [tests]
+        priority: high
+        depends_on: ["2.1", "2.2"]
+        acceptance: |
+          - tests/fixtures/ contains:
+            - claude-code/ directory with 3+ realistic JSONL session files:
+              - Simple single-session build (10 turns)
+              - Multi-session with continuation (compaction + resume)
+              - Team mode with subagent sessions
+            - codex/ directory with 2+ realistic JSONL session files
+            - sample-checklist.yaml (valid, 3 phases, 8 items)
+            - invalid-checklist.yaml (missing required fields)
+            - sample-build-log.json (valid, matching schema)
+          - Fixtures are realistic (not lorem ipsum) — use plausible code tasks
+          - Each fixture has a comment header explaining what it tests
+
+      - id: "7.2"
+        title: Achieve >80% test coverage on core modules
+        tags: [tests]
+        priority: high
+        depends_on: ["7.1"]
+        acceptance: |
+          - vitest coverage report shows >80% line coverage for:
+            - src/parsers/ (all files)
+            - src/correlator/ (all files)
+            - src/collectors/ (all files)
+          - Edge cases tested:
+            - Empty session files
+            - Session files with only system messages
+            - Checklist with no matching turns
+            - Git repo with no commits in time range
+            - Malformed JSONL (graceful error, not crash)
+          - npm run test passes with 0 failures
+          - npm run test:coverage generates report
+
+      - id: "7.3"
+        title: End-to-end integration test
+        tags: [tests]
+        priority: high
+        depends_on: ["6.2", "7.1"]
+        acceptance: |
+          - tests/e2e/ contains at least one full pipeline test:
+            - Starts with fixture JSONL + checklist
+            - Runs parse → correlate → report
+            - Verifies build_log.json matches schema
+            - Verifies HTML dashboard is valid HTML
+            - Verifies executive summary is valid HTML
+            - Verifies Excalidraw files are valid JSON
+          - Test runs in CI without any external dependencies
+          - Test completes in under 30 seconds
+
+      - id: "7.4"
+        title: Error handling and graceful degradation
+        tags: [backend]
+        priority: medium
+        depends_on: ["7.2"]
+        acceptance: |
+          - Every public function has try/catch with meaningful error messages
+          - Missing session files: warns and continues (partial log)
+          - Missing checklist: generates log without checklist correlation
+          - Missing git: generates log without git data
+          - Invalid JSONL lines: skips line, logs warning, continues parsing
+          - Circular depends_on in checklist: detected and reported at parse time
+          - All error messages include file paths and line numbers where applicable
+          - No unhandled promise rejections
