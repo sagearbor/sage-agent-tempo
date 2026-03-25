@@ -1,0 +1,9 @@
+description: Missing the required project field
+
+phases:
+  - id: phase-1
+    name: Setup
+    items:
+      - id: item-1
+        title: Some task
+        tags: [config]
