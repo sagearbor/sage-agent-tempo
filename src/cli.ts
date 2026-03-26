@@ -25,7 +25,7 @@ program
   .description(
     "Track what AI agents build, how long it takes, and what it costs"
   )
-  .version("0.3.1");
+  .version("0.3.2");
 
 // ── parse ──────────────────────────────────────────────────────────
 
@@ -623,6 +623,64 @@ program
     } catch (err) {
       console.error("Reconcile failed:", (err as Error).message);
       process.exit(1);
+    }
+  });
+
+// ── status ─────────────────────────────────────────────────────────
+
+program
+  .command("status")
+  .description("Show checklist progress — paste into Claude Code to resume work")
+  .option("--checklist <path>", "Path to checklist", "developer_checklist.yaml")
+  .option("--input <path>", "Path to build_log.json", "build_log.json")
+  .action((opts) => {
+    try {
+      const checklistPath = resolve(opts.checklist);
+      if (!existsSync(checklistPath)) {
+        console.log("No developer_checklist.yaml found.");
+        return;
+      }
+
+      const checklist = parseChecklist(checklistPath);
+      const buildLogPath = resolve(opts.input);
+      const hasBuildLog = existsSync(buildLogPath);
+
+      // Get done items from build log if available
+      const doneIds = new Set<string>();
+      if (hasBuildLog) {
+        const log: BuildLog = JSON.parse(readFileSync(buildLogPath, "utf-8"));
+        for (const item of log.checklist.items) {
+          if (item.status === "done") doneIds.add(item.id);
+        }
+      }
+
+      const total = checklist.items.length;
+      const done = checklist.items.filter((i) => doneIds.has(i.id)).length;
+      const pending = checklist.items.filter((i) => !doneIds.has(i.id));
+
+      console.log(`\n${checklist.project}: ${done}/${total} items done (${Math.round((done / total) * 100)}%)\n`);
+
+      if (pending.length === 0) {
+        console.log("All items complete!");
+      } else {
+        console.log("Next items:");
+        for (const item of pending.slice(0, 5)) {
+          console.log(`  ${item.id}: ${item.title} [${item.tags.join(", ")}]`);
+        }
+        if (pending.length > 5) {
+          console.log(`  ... and ${pending.length - 5} more`);
+        }
+      }
+
+      console.log("\nResume prompt:");
+      console.log("─".repeat(60));
+      if (pending.length > 0) {
+        console.log(`Use the sage-agent-tempo skill. Read developer_checklist.yaml — continue working on all pending items. Use parallel agents. Keep working until all items are done.`);
+      }
+      console.log("─".repeat(60));
+      console.log();
+    } catch (err) {
+      console.error("Status failed:", (err as Error).message);
     }
   });
 
