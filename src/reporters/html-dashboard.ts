@@ -175,30 +175,51 @@ function testResultsData(items: ChecklistItemResult[]): string {
   });
 }
 
-function tokenEfficiencyData(timeline: TimelineEvent[]): string {
+function tokenEfficiencyData(
+  timeline: TimelineEvent[],
+  items: ChecklistItemResult[],
+): string {
   const sorted = [...timeline].sort(
     (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime(),
   );
 
+  // Build item ID → title lookup
+  const itemTitles = new Map<string, string>();
+  for (const item of items) {
+    itemTitles.set(item.id, `${item.id} ${item.title}`);
+  }
+
   const times: string[] = [];
   const cumulativeTokens: number[] = [];
   const cumulativeItems: number[] = [];
+  const activeItems: string[] = [];
   let tokenSum = 0;
   let itemSum = 0;
+  let currentItem = "";
 
   for (const ev of sorted) {
-    if (ev.type === "checklist_done") {
+    // Track which checklist item is active
+    if (ev.type === "checklist_start" && ev.itemId) {
+      currentItem = itemTitles.get(ev.itemId) ?? ev.itemId;
+    }
+    if (ev.type === "checklist_done" && ev.itemId) {
+      currentItem = itemTitles.get(ev.itemId) ?? ev.itemId;
       itemSum++;
       times.push(ev.at);
       cumulativeTokens.push(tokenSum);
       cumulativeItems.push(itemSum);
+      activeItems.push(currentItem);
     }
     if (ev.tokens && ev.tokens > 0) {
+      // Track active item from tool_call events
+      if (ev.itemId) {
+        currentItem = itemTitles.get(ev.itemId) ?? ev.itemId;
+      }
       tokenSum += ev.tokens;
-      // Also record a token data point (without incrementing items)
       times.push(ev.at);
       cumulativeTokens.push(tokenSum);
       cumulativeItems.push(itemSum);
+      activeItems.push(currentItem || "overhead");
     }
   }
 
@@ -224,7 +245,7 @@ function tokenEfficiencyData(timeline: TimelineEvent[]): string {
     }
   }
 
-  return JSON.stringify({ times, cumulativeTokens, cumulativeItems, workTimes, workTokens, workItems });
+  return JSON.stringify({ times, cumulativeTokens, cumulativeItems, activeItems, workTimes, workTokens, workItems });
 }
 
 function modelBreakdownData(modelUsage: ModelUsageEntry[]): string {
@@ -263,7 +284,7 @@ export function generateDashboard(buildLog: BuildLog): string {
   const phases = phaseBreakdownData(checklist.items, summary.totalEstimatedCostUsd, summary.totalTokens);
   const tests = testResultsData(checklist.items);
   const models = modelBreakdownData(summary.modelUsage ?? []);
-  const efficiency = tokenEfficiencyData(timeline);
+  const efficiency = tokenEfficiencyData(timeline, checklist.items);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -594,6 +615,8 @@ export function generateDashboard(buildLog: BuildLog): string {
       return {
         x: t, y: v, type: 'scatter', mode: 'lines',
         name: 'Cumulative Tokens', line: { color: '#4e79a7', width: 2 }, yaxis: 'y',
+        customdata: effData.activeItems,
+        hovertemplate: '%{x}<br>Tokens: %{y:,.0f}<br>Working on: %{customdata}<extra></extra>',
       };
     }
     function effItemTrace(view) {
@@ -602,6 +625,8 @@ export function generateDashboard(buildLog: BuildLog): string {
       return {
         x: t, y: v, type: 'scatter', mode: 'lines',
         name: 'Items Completed', line: { color: '#59a14f', width: 2, shape: 'hv' }, yaxis: 'y2',
+        customdata: effData.activeItems,
+        hovertemplate: '%{x}<br>Items done: %{y}<br>Working on: %{customdata}<extra></extra>',
       };
     }
     function effLayout(view) {
