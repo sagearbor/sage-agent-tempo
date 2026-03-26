@@ -12,6 +12,7 @@ import type {
   SessionSummary,
   TokenUsage,
 } from "./types.js";
+import { parseTestOutput } from "../collectors/test-results.js";
 
 // ── Internal helpers ─────────────────────────────────────────────
 
@@ -36,7 +37,79 @@ interface RawRecord {
       name?: string;
       input?: Record<string, unknown>;
       text?: string;
+      content?: string | Array<{ type: string; text?: string }>;
+      tool_use_id?: string;
     }>;
+  };
+}
+
+// ── Test output detection ────────────────────────────────────────
+
+const TEST_OUTPUT_PATTERNS = [
+  /Tests?\s+\d+\s+passed/i,
+  /Tests:\s+\d+\s+passed/i,
+  /\d+\s+pass(?:ed|ing)/i,
+  /\bPASS\b/,
+  /\bFAIL\b/,
+  /\d+\s+passed.*in\s+\d/i, // pytest-style summary
+];
+
+function looksLikeTestOutput(text: string): boolean {
+  return TEST_OUTPUT_PATTERNS.some((re) => re.test(text));
+}
+
+/**
+ * Extract text from tool_result content blocks in a record.
+ * tool_result blocks can have `content` as a string or as an array of
+ * { type: "text", text: "..." } objects.
+ */
+function extractToolResultTexts(record: RawRecord): string[] {
+  const texts: string[] = [];
+  if (!record.message?.content) return texts;
+
+  for (const block of record.message.content) {
+    if (block.type !== "tool_result") continue;
+
+    if (typeof block.content === "string") {
+      texts.push(block.content);
+    } else if (Array.isArray(block.content)) {
+      for (const inner of block.content) {
+        if (inner.type === "text" && inner.text) {
+          texts.push(inner.text);
+        }
+      }
+    }
+    // Some JSONL files put the result directly in `text`
+    if (block.text) {
+      texts.push(block.text);
+    }
+  }
+  return texts;
+}
+
+/**
+ * Parse test results from tool_result text if it looks like test runner output.
+ * Returns undefined if no test output is detected.
+ */
+function extractTestResults(
+  record: RawRecord,
+): NormalizedTurn["testResults"] | undefined {
+  const texts = extractToolResultTexts(record);
+  if (texts.length === 0) return undefined;
+
+  const combined = texts.join("\n");
+  if (!looksLikeTestOutput(combined)) return undefined;
+
+  // Use the existing parseTestOutput with "unknown" framework for auto-detection
+  const parsed = parseTestOutput(combined, "unknown");
+  if (parsed.total === 0 && parsed.passed === 0 && parsed.failed === 0) {
+    return undefined;
+  }
+
+  return {
+    passed: parsed.passed,
+    failed: parsed.failed,
+    skipped: parsed.skipped,
   };
 }
 
@@ -157,7 +230,9 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
   const seenUuids = new Set<string>();
   const turns: NormalizedTurn[] = [];
 
-  for (const record of records) {
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+
     // Skip compact summaries and compact boundaries
     if (record.isCompactSummary === true) continue;
     if (record.type === "compact_boundary") continue;
@@ -180,7 +255,32 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
     // so subagent turns get their own session, not merged with the parent
     const sessionId = isSubagentFile ? fileName : (record.sessionId ?? "unknown");
 
-    turns.push(recordToTurn(record, sessionId));
+    const turn = recordToTurn(record, sessionId);
+
+    // Look ahead for tool_result records (in the next user message) that
+    // contain test runner output. Tool results follow the assistant turn
+    // that issued the tool_use.
+    for (let j = i + 1; j < records.length; j++) {
+      const next = records[j];
+      // Stop at the next assistant message — tool results belong to THIS turn
+      if (next.type === "assistant") break;
+      // Skip non-user records
+      if (next.type !== "user") continue;
+
+      const testResults = extractTestResults(next);
+      if (testResults) {
+        // Merge: if multiple tool results have test output, accumulate
+        if (turn.testResults) {
+          turn.testResults.passed += testResults.passed;
+          turn.testResults.failed += testResults.failed;
+          turn.testResults.skipped += testResults.skipped;
+        } else {
+          turn.testResults = testResults;
+        }
+      }
+    }
+
+    turns.push(turn);
   }
 
   return turns;

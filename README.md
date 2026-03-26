@@ -19,8 +19,7 @@ cd your-project && claude
 # The agent auto-creates a developer_checklist.yaml and announces progress as it works
 
 # 3. Generate reports anytime (reads Claude Code session files from ~/.claude/)
-npx sage-agent-tempo parse --agent claude-code   # Parse session data → build_log.json
-npx sage-agent-tempo report --format all          # Generate dashboard, executive summary, diagrams
+npx sage-agent-tempo refresh                      # Parse + generate all reports in one step
 # Open reports/dashboard.html in a browser
 ```
 
@@ -218,6 +217,8 @@ Every event in the log follows this structure:
 You can skip the skill and just run the CLI. Without a checklist, the tool auto-infers work blocks from session data:
 
 ```bash
+npx sage-agent-tempo refresh                      # One command: parse + report
+# Or run the steps separately:
 npx sage-agent-tempo parse --agent claude-code
 npx sage-agent-tempo report --format all
 ```
@@ -226,6 +227,7 @@ npx sage-agent-tempo report --format all
 
 ```bash
 npx sage-agent-tempo --help              # Show all commands
+npx sage-agent-tempo refresh [options]   # Parse + report in one step
 npx sage-agent-tempo parse [options]     # Parse sessions → build_log.json
 npx sage-agent-tempo report [options]    # Generate reports from build_log.json
 npx sage-agent-tempo collapse            # Shrink completed checklist items

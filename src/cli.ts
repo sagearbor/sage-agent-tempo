@@ -12,7 +12,10 @@ import { getCommitsSince } from "./collectors/git.js";
 import { writeDashboard } from "./reporters/html-dashboard.js";
 import { writeExecutiveSummary } from "./reporters/executive-summary.js";
 import { writeExcalidrawFiles } from "./reporters/excalidraw.js";
-import { collapseChecklist } from "./commands/collapse.js";
+import { writeComparisonDashboard } from "./reporters/comparison-dashboard.js";
+import { collapseChecklist, autoCollapseIfNeeded } from "./commands/collapse.js";
+import { reconcile, formatReconcileTable, fixUncovered } from "./commands/reconcile.js";
+import { exportPng } from "./commands/export-png.js";
 import type { BuildLog, ParsedChecklist } from "./parsers/types.js";
 
 const program = new Command();
@@ -38,6 +41,7 @@ program
   .option("--output <path>", "Output path for build_log.json", "build_log.json")
   .option("--session-dir <path>", "Override session directory")
   .option("--no-archive", "Skip archiving previous build_log.json")
+  .option("--no-auto-collapse", "Skip auto-collapsing 100% complete phases")
   .action(async (opts) => {
     try {
       let checklist: ParsedChecklist | undefined;
@@ -91,6 +95,11 @@ program
 
       writeFileSync(outputPath, JSON.stringify(buildLog, null, 2));
       console.log(`Build log written to ${outputPath}`);
+
+      // Auto-collapse completed phases if checklist exists
+      if (opts.autoCollapse !== false && existsSync(checklistPath)) {
+        autoCollapseIfNeeded(checklistPath, outputPath);
+      }
     } catch (err) {
       console.error("Parse failed:", (err as Error).message);
       process.exit(1);
@@ -158,11 +167,141 @@ program
       if (format === "all" || format === "excalidraw") {
         writeExcalidrawFiles(buildLog, outputDir);
         console.log(`Excalidraw diagrams written to ${outputDir}`);
+
+        // Attempt PNG export if Playwright is available
+        try {
+          await exportPng(outputDir, 2);
+        } catch {
+          // Playwright unavailable — silently skip PNG export
+        }
       }
 
       console.log("Reports generated successfully.");
     } catch (err) {
       console.error("Report generation failed:", (err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// ── export-png ────────────────────────────────────────────────────
+
+program
+  .command("export-png")
+  .description("Convert .excalidraw files to PNG using Playwright (if installed)")
+  .argument("[dir]", "Directory containing .excalidraw files", "reports")
+  .option("--scale <n>", "Scale factor for PNG output", "2")
+  .action(async (dir: string, opts: { scale: string }) => {
+    const targetDir = resolve(dir);
+    if (!existsSync(targetDir)) {
+      console.error(`Directory not found: ${targetDir}`);
+      process.exit(1);
+    }
+    await exportPng(targetDir, Number(opts.scale));
+  });
+
+// ── refresh ───────────────────────────────────────────────────────
+
+program
+  .command("refresh")
+  .description("Parse session data and generate all reports (combines parse + report)")
+  .option("--agent <agent>", "Agent type (auto-detects if omitted)")
+  .option("--checklist <path>", "Path to checklist (defaults to developer_checklist.yaml)")
+  .option("--format <format>", "Report format", "all")
+  .option("--output-dir <dir>", "Report output directory", "reports")
+  .option("--no-archive", "Skip archiving previous files")
+  .action(async (opts) => {
+    try {
+      // ── Parse phase ──────────────────────────────────────────────
+      let checklist: ParsedChecklist | undefined;
+      const checklistPath = resolve(opts.checklist ?? "developer_checklist.yaml");
+
+      if (existsSync(checklistPath)) {
+        console.log("Parsing checklist...");
+        checklist = parseChecklist(checklistPath);
+      } else if (opts.checklist) {
+        // User explicitly specified a path that doesn't exist — that's an error
+        console.error(`Checklist not found: ${checklistPath}`);
+        process.exit(1);
+      } else {
+        console.log(
+          "No checklist found — inferring work blocks from session data",
+        );
+      }
+
+      console.log("Parsing session files...");
+      const sessions = await parseAuto({ agent: opts.agent });
+      console.log(`Found ${sessions.length} session(s)`);
+
+      console.log("Collecting git history...");
+      const commits = getCommitsSince(
+        new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      );
+
+      console.log("Correlating data...");
+      const buildLog = correlate({ sessions, checklist, commits });
+
+      const buildLogPath = resolve("build_log.json");
+
+      if (opts.archive !== false) {
+        archivePrevious(
+          [buildLogPath],
+          join(dirname(buildLogPath), "build_log.archive"),
+        );
+      }
+
+      writeFileSync(buildLogPath, JSON.stringify(buildLog, null, 2));
+      console.log(`Build log written to ${buildLogPath}`);
+
+      // ── Report phase ─────────────────────────────────────────────
+      const outputDir = resolve(opts.outputDir);
+      mkdirSync(outputDir, { recursive: true });
+
+      const format = opts.format;
+
+      if (opts.archive !== false) {
+        const reportFiles = [
+          ...(format === "all" || format === "dashboard"
+            ? [join(outputDir, "dashboard.html")]
+            : []),
+          ...(format === "all" || format === "executive"
+            ? [join(outputDir, "executive-summary.html")]
+            : []),
+          ...(format === "all" || format === "excalidraw"
+            ? [
+                join(outputDir, "architecture.excalidraw"),
+                join(outputDir, "timeline.excalidraw"),
+              ]
+            : []),
+        ];
+        archivePrevious(reportFiles, join(outputDir, "archive"));
+      }
+
+      if (format === "all" || format === "dashboard") {
+        const dashPath = join(outputDir, "dashboard.html");
+        writeDashboard(buildLog, dashPath);
+        console.log(`Dashboard written to ${dashPath}`);
+      }
+
+      if (format === "all" || format === "executive") {
+        const execPath = join(outputDir, "executive-summary.html");
+        writeExecutiveSummary(buildLog, execPath);
+        console.log(`Executive summary written to ${execPath}`);
+      }
+
+      if (format === "all" || format === "excalidraw") {
+        writeExcalidrawFiles(buildLog, outputDir);
+        console.log(`Excalidraw diagrams written to ${outputDir}`);
+      }
+
+      // ── Summary ──────────────────────────────────────────────────
+      const itemCount = buildLog.checklist.items.length;
+      const sessionCount = sessions.length;
+      const totalTokens = buildLog.summary.totalTokens;
+      console.log(
+        `\nRefreshed: ${itemCount} items, ${sessionCount} sessions, ${totalTokens} total tokens. Reports in ${opts.outputDir}/`,
+      );
+    } catch (err) {
+      console.error("Refresh failed:", (err as Error).message);
       process.exit(1);
     }
   });
@@ -208,6 +347,7 @@ program
           testsFailed: 0,
           filesCreated: 0,
           architectureBreakdown: {},
+          modelUsage: [],
         },
         timeline: [],
       };
@@ -400,6 +540,88 @@ program
       }
     } catch (err) {
       console.error("Collapse failed:", (err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// ── compare ───────────────────────────────────────────────────────
+
+program
+  .command("compare")
+  .description("Compare build metrics across multiple projects")
+  .argument("<dirs...>", "Directories containing build_log.json files")
+  .option("--output <path>", "Output HTML path", "comparison.html")
+  .action((dirs: string[], opts: { output: string }) => {
+    try {
+      const logs: BuildLog[] = [];
+
+      for (const dir of dirs) {
+        const dirPath = resolve(dir);
+        const logPath = join(dirPath, "build_log.json");
+
+        if (!existsSync(logPath)) {
+          console.error(`build_log.json not found in: ${dirPath}`);
+          process.exit(1);
+        }
+
+        const buildLog: BuildLog = JSON.parse(readFileSync(logPath, "utf-8"));
+        logs.push(buildLog);
+        console.log(`Loaded: ${buildLog.project} (${logPath})`);
+      }
+
+      if (logs.length < 2) {
+        console.error("At least 2 directories are required for comparison.");
+        process.exit(1);
+      }
+
+      const outputPath = resolve(opts.output);
+      writeComparisonDashboard(logs, outputPath);
+      console.log(`Comparison dashboard written to ${outputPath}`);
+    } catch (err) {
+      console.error("Compare failed:", (err as Error).message);
+      process.exit(1);
+    }
+  });
+
+// ── reconcile ─────────────────────────────────────────────────────
+
+program
+  .command("reconcile")
+  .description("Compare a spec file against the checklist and report gaps")
+  .requiredOption("--spec <path>", "Path to spec file (PRP.md, PRD.md, etc.)")
+  .option(
+    "--checklist <path>",
+    "Path to developer_checklist.yaml",
+    "developer_checklist.yaml"
+  )
+  .option("--fix", "Auto-add uncovered spec sections as new checklist items", false)
+  .action((opts: { spec: string; checklist: string; fix: boolean }) => {
+    try {
+      const specPath = resolve(opts.spec);
+      const checklistPath = resolve(opts.checklist);
+
+      if (!existsSync(specPath)) {
+        console.error(`Spec file not found: ${specPath}`);
+        process.exit(1);
+      }
+
+      if (!existsSync(checklistPath)) {
+        console.error(`Checklist not found: ${checklistPath}`);
+        process.exit(1);
+      }
+
+      const specContent = readFileSync(specPath, "utf-8");
+      const checklist = parseChecklist(checklistPath);
+      const result = reconcile(specContent, checklist);
+
+      console.log(formatReconcileTable(result));
+
+      if (opts.fix && result.uncovered.length > 0) {
+        const added = fixUncovered(checklistPath, result.uncovered);
+        console.log(`\nAdded ${added} uncovered spec section(s) to ${checklistPath}`);
+      }
+    } catch (err) {
+      console.error("Reconcile failed:", (err as Error).message);
       process.exit(1);
     }
   });

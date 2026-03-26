@@ -1,5 +1,5 @@
 import { writeFileSync } from "node:fs";
-import type { BuildLog, ChecklistItemResult, TimelineEvent } from "../parsers/types.js";
+import type { BuildLog, ChecklistItemResult, ModelUsageEntry, TimelineEvent } from "../parsers/types.js";
 
 // ── Color palette for phases ────────────────────────────────────────
 const PHASE_COLORS: Record<string, string> = {
@@ -162,6 +162,16 @@ function testResultsData(items: ChecklistItemResult[]): string {
   return JSON.stringify({ passed, failed, skipped });
 }
 
+function modelBreakdownData(modelUsage: ModelUsageEntry[]): string {
+  const entries = modelUsage.filter((e) => e.tokens > 0);
+  return JSON.stringify({
+    labels: entries.map((e) => e.model),
+    tokens: entries.map((e) => e.tokens),
+    costs: entries.map((e) => Math.round(e.estimatedCostUsd * 100) / 100),
+    turns: entries.map((e) => e.turns),
+  });
+}
+
 // ── Placeholder helper (avoids innerHTML with dynamic content) ──────
 
 function noDataPlaceholder(id: string): string {
@@ -187,6 +197,7 @@ export function generateDashboard(buildLog: BuildLog): string {
   const arch = archBreakdownData(summary.architectureBreakdown);
   const phases = phaseBreakdownData(checklist.items, summary.totalEstimatedCostUsd, summary.totalTokens);
   const tests = testResultsData(checklist.items);
+  const models = modelBreakdownData(summary.modelUsage ?? []);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -322,6 +333,10 @@ export function generateDashboard(buildLog: BuildLog): string {
   <div class="card">
     <h2>Phase Breakdown</h2>
     <div id="phaseBreakdown" class="chart"></div>
+  </div>
+  <div class="card full-width">
+    <h2>Agent &amp; Model Breakdown</h2>
+    <div id="modelBreakdown" class="chart"></div>
   </div>
   <div class="card full-width">
     <h2>Test Results</h2>
@@ -462,6 +477,39 @@ export function generateDashboard(buildLog: BuildLog): string {
     }), config);
   } else {
     ${noDataPlaceholder("phaseBreakdown")}
+  }
+
+  // ── Model Breakdown ─────────────────────────────────────────
+  var modelData = ${models};
+  if (modelData.labels.length > 0) {
+    var modelText = modelData.labels.map(function(label, i) {
+      return label + '<br>' + modelData.tokens[i].toLocaleString() + ' tokens<br>$' + modelData.costs[i].toFixed(2);
+    });
+    var modelColors = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#9c755f','#ff9da7','#86bcb6'];
+    Plotly.newPlot('modelBreakdown', [{
+      type: 'pie',
+      labels: modelData.labels,
+      values: modelData.tokens,
+      hole: 0.5,
+      text: modelText,
+      textinfo: 'label+percent',
+      hovertemplate: '%{text}<extra></extra>',
+      marker: { colors: modelColors.slice(0, modelData.labels.length) },
+      textposition: 'outside',
+      automargin: true,
+    }], Object.assign({}, layout, {
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.15 },
+      annotations: [{
+        text: modelData.labels.length + ' model' + (modelData.labels.length > 1 ? 's' : ''),
+        showarrow: false,
+        font: { size: 14, color: '#6a737d' },
+        x: 0.5,
+        y: 0.5,
+      }],
+    }), config);
+  } else {
+    ${noDataPlaceholder("modelBreakdown")}
   }
 
   // ── Test Results ──────────────────────────────────────────────

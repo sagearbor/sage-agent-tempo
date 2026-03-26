@@ -49,6 +49,13 @@ export const NormalizedTurnSchema = z.object({
   filesTouched: z.array(z.string()).default([]),
   content: z.string().optional(),
   isSubagent: z.boolean().default(false),
+  testResults: z
+    .object({
+      passed: z.number(),
+      failed: z.number(),
+      skipped: z.number(),
+    })
+    .optional(),
 });
 export type NormalizedTurn = z.infer<typeof NormalizedTurnSchema>;
 
@@ -118,6 +125,18 @@ export const ArchitectureBreakdownEntrySchema = z.object({
   durationMinutes: z.number(),
 });
 
+export const ModelUsageEntrySchema = z.object({
+  model: z.string(),
+  tokens: z.number(),
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  cacheReadTokens: z.number(),
+  cacheCreationTokens: z.number(),
+  estimatedCostUsd: z.number(),
+  turns: z.number(),
+});
+export type ModelUsageEntry = z.infer<typeof ModelUsageEntrySchema>;
+
 export const BuildSummarySchema = z.object({
   totalDurationMinutes: z.number(),
   totalTokens: z.number(),
@@ -129,6 +148,7 @@ export const BuildSummarySchema = z.object({
   testsFailed: z.number(),
   filesCreated: z.number(),
   architectureBreakdown: z.record(ArchitectureBreakdownEntrySchema).default({}),
+  modelUsage: z.array(ModelUsageEntrySchema).default([]),
 });
 export type BuildSummary = z.infer<typeof BuildSummarySchema>;
 

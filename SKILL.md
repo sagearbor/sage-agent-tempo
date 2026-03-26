@@ -61,11 +61,14 @@ phases:
 
 ### During development
 
+**CRITICAL — ALL agents (main and subagents) MUST do this:**
+
 1. **Before starting work**, read `developer_checklist.yaml` to understand the plan.
-2. **When you start an item**: say "Starting item X.Y" in your response.
+2. **When you start an item**: say "Starting item X.Y" in your first response. This is how tokens get attributed to checklist items.
 3. **When you finish an item**: say "Completed item X.Y" in your response.
-4. **When scope changes**: update `developer_checklist.yaml` — add new items with the next available ID, update titles, or mark status.
-5. **If you are a subagent** (spawned by an orchestrator), do NOT modify `developer_checklist.yaml` directly. Instead, include a structured progress block at the end of your response (see TEMPO_STATUS format below).
+4. **If you are spawning subagents**: include the checklist item ID in the subagent's prompt. Example: "You are working on item 2.3. Say 'Starting item 2.3' at the beginning of your response."
+5. **If you are a subagent**: say "Starting item X.Y" at the top of your first response AND include a TEMPO_STATUS block at the end (see format below). Do NOT modify `developer_checklist.yaml` directly.
+6. **When scope changes** (main agent only): update `developer_checklist.yaml` — add new items, update titles, mark status.
 
 ### After work
 
@@ -112,3 +115,29 @@ TEMPO_STATUS:
 ```
 
 The orchestrator or a dedicated sync agent will update the YAML from these reports. This avoids parallel write conflicts and keeps your context focused on your actual work.
+
+### Sync agent pattern
+
+When an orchestrator spawns subagents, it should also spawn a lightweight "tempo-sync" agent whose only job is to watch for `TEMPO_STATUS` blocks in subagent outputs and update `developer_checklist.yaml` accordingly.
+
+**Why a dedicated sync agent?** Subagents should never write to `developer_checklist.yaml` directly — parallel writes cause conflicts and data loss. Instead, all subagents emit `TEMPO_STATUS` blocks, and the sync agent is the single writer that applies those updates.
+
+**How it works:**
+
+1. The orchestrator spawns subagents for actual work (e.g., "build feature X", "write tests for Y").
+2. The orchestrator also spawns one `tempo-sync` agent.
+3. When a subagent finishes and its output contains a `TEMPO_STATUS` block, the orchestrator routes that block to the sync agent.
+4. The sync agent reads `developer_checklist.yaml`, applies the updates, and writes it back.
+
+**Sample prompt for the sync agent:**
+
+```
+You are the sage-agent-tempo sync agent. Your only job is to update developer_checklist.yaml based on TEMPO_STATUS blocks from other agents. When you receive a status update: mark completed items, add discovered items, update in-progress items. Do not do any other work.
+```
+
+**Rules:**
+
+- The sync agent should be the ONLY agent that writes to `developer_checklist.yaml` — all other agents use `TEMPO_STATUS` blocks.
+- Discovered items should be appended to the appropriate phase with the next available ID.
+- If a phase referenced by a discovered item does not exist, create it.
+- The sync agent should log each update it makes (e.g., "Marked 2.1 as done", "Added new item 3.4: Handle edge case X").

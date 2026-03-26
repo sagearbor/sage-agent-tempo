@@ -53,12 +53,13 @@ export function correlate(opts: CorrelateOptions): BuildLog {
       testsFailed: 0,
       filesCreated: 0,
       architectureBreakdown: {},
+      modelUsage: [],
     },
     timeline: [],
   };
 
   buildLog.timeline = generateTimeline(buildLog, sessions);
-  buildLog.summary = generateSummary(buildLog, testResults);
+  buildLog.summary = generateSummary(buildLog, { testResults, turns: allTurns });
 
   return BuildLogSchema.parse(buildLog);
 }
@@ -187,8 +188,36 @@ function buildItemResult(
     toolsUsed,
     filesCreated,
     filesModified: [],
-    tests: { created: 0, passed: 0, failed: 0 },
+    tests: aggregateTestResults(itemTurns),
     gitCommits: itemCommits,
+  };
+}
+
+/**
+ * Aggregate test results from turns that have them.
+ * Uses the *last* test run's results (most representative of final state),
+ * and counts the total number of test runs as "created".
+ */
+function aggregateTestResults(
+  turns: NormalizedTurn[],
+): { created: number; passed: number; failed: number } {
+  let passed = 0;
+  let failed = 0;
+  let totalRuns = 0;
+
+  for (const turn of turns) {
+    if (turn.testResults) {
+      // Take the latest test run's results (overwrite previous)
+      passed = turn.testResults.passed;
+      failed = turn.testResults.failed;
+      totalRuns++;
+    }
+  }
+
+  return {
+    created: totalRuns > 0 ? passed + failed : 0,
+    passed,
+    failed,
   };
 }
 
