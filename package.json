@@ -1,6 +1,6 @@
 {
   "name": "sage-agent-tempo",
-  "version": "0.3.0",
+  "version": "0.3.11",
   "description": "Reusable skill for tracking what AI agents build, how long it takes, and what it costs",
   "type": "module",
   "main": "./dist/index.js",

@@ -227,8 +227,31 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
   const isUuidFilename = /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(fileName);
   const canonicalSessionId = (!isSubagentFile && isUuidFilename) ? fileName : undefined;
 
+  // For subagent files, extract the first user message as task context.
+  // Orchestrators often include "Starting item X.Y" in the subagent prompt,
+  // which we prepend to the first assistant turn's content so the correlator
+  // can match it to a checklist item.
+  let subagentTaskContext: string | undefined;
+  if (isSubagentFile) {
+    for (const record of records) {
+      if (record.type === "user") {
+        const content = record.message?.content;
+        if (typeof content === "string") {
+          subagentTaskContext = content;
+        } else if (Array.isArray(content)) {
+          subagentTaskContext = content
+            .filter((b) => b.type === "text" && b.text)
+            .map((b) => b.text!)
+            .join("\n");
+        }
+        break;
+      }
+    }
+  }
+
   const seenUuids = new Set<string>();
   const turns: NormalizedTurn[] = [];
+  let isFirstTurn = true;
 
   for (let i = 0; i < records.length; i++) {
     const record = records[i];
@@ -251,11 +274,22 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
       seenUuids.add(record.uuid);
     }
 
-    // For subagent files, use the agent ID from the filename as a pseudo-sessionId
-    // so subagent turns get their own session, not merged with the parent
-    const sessionId = isSubagentFile ? fileName : (record.sessionId ?? "unknown");
+    const turn = recordToTurn(record, record.sessionId ?? "unknown");
 
-    const turn = recordToTurn(record, sessionId);
+    // For subagent files, override the sessionId with the filename so each
+    // subagent gets its own session, not merged with the parent
+    if (isSubagentFile) {
+      turn.sessionId = fileName;
+    }
+
+    // Prepend subagent task context to the first turn so the correlator
+    // can match "Starting item X.Y" from the orchestrator's prompt
+    if (isFirstTurn && subagentTaskContext && turn.content) {
+      turn.content = subagentTaskContext + "\n" + turn.content;
+    } else if (isFirstTurn && subagentTaskContext) {
+      turn.content = subagentTaskContext;
+    }
+    isFirstTurn = false;
 
     // Look ahead for tool_result records (in the next user message) that
     // contain test runner output. Tool results follow the assistant turn

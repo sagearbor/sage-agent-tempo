@@ -3,6 +3,7 @@
 import { Command } from "commander";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { archivePrevious } from "./utils/archive.js";
 import { parseChecklist } from "./collectors/checklist.js";
 import { parseAuto } from "./parsers/index.js";
@@ -16,7 +17,33 @@ import { writeComparisonDashboard } from "./reporters/comparison-dashboard.js";
 import { collapseChecklist, autoCollapseIfNeeded } from "./commands/collapse.js";
 import { reconcile, formatReconcileTable, fixUncovered } from "./commands/reconcile.js";
 import { exportPng } from "./commands/export-png.js";
+import { fileURLToPath } from "node:url";
 import type { BuildLog, ParsedChecklist } from "./parsers/types.js";
+
+// Read version from package.json so it stays in sync automatically
+const __cliDir = dirname(fileURLToPath(import.meta.url));
+const VERSION = JSON.parse(
+  readFileSync(join(__cliDir, "..", "package.json"), "utf-8")
+).version as string;
+
+// ── Update check (non-blocking) ───────────────────────────────────
+function checkForUpdate(): void {
+  try {
+    const result = execFileSync("npm", ["view", "sage-agent-tempo", "version"], {
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (result && result !== VERSION) {
+      console.log(
+        `\n  Update available: ${VERSION} → ${result}` +
+        `\n  Run: npm install -g sage-agent-tempo@latest\n`
+      );
+    }
+  } catch {
+    // Network unavailable or timeout — skip silently
+  }
+}
 
 const program = new Command();
 
@@ -25,7 +52,11 @@ program
   .description(
     "Track what AI agents build, how long it takes, and what it costs"
   )
-  .version("0.1.0");
+  .version(VERSION)
+  .hook("postAction", () => {
+    // Check for updates after command runs (non-blocking UX)
+    checkForUpdate();
+  });
 
 // ── parse ──────────────────────────────────────────────────────────
 
@@ -623,6 +654,64 @@ program
     } catch (err) {
       console.error("Reconcile failed:", (err as Error).message);
       process.exit(1);
+    }
+  });
+
+// ── status ─────────────────────────────────────────────────────────
+
+program
+  .command("status")
+  .description("Show checklist progress — paste into Claude Code to resume work")
+  .option("--checklist <path>", "Path to checklist", "developer_checklist.yaml")
+  .option("--input <path>", "Path to build_log.json", "build_log.json")
+  .action((opts) => {
+    try {
+      const checklistPath = resolve(opts.checklist);
+      if (!existsSync(checklistPath)) {
+        console.log("No developer_checklist.yaml found.");
+        return;
+      }
+
+      const checklist = parseChecklist(checklistPath);
+      const buildLogPath = resolve(opts.input);
+      const hasBuildLog = existsSync(buildLogPath);
+
+      // Get done items from build log if available
+      const doneIds = new Set<string>();
+      if (hasBuildLog) {
+        const log: BuildLog = JSON.parse(readFileSync(buildLogPath, "utf-8"));
+        for (const item of log.checklist.items) {
+          if (item.status === "done") doneIds.add(item.id);
+        }
+      }
+
+      const total = checklist.items.length;
+      const done = checklist.items.filter((i) => doneIds.has(i.id)).length;
+      const pending = checklist.items.filter((i) => !doneIds.has(i.id));
+
+      console.log(`\n${checklist.project}: ${done}/${total} items done (${Math.round((done / total) * 100)}%)\n`);
+
+      if (pending.length === 0) {
+        console.log("All items complete!");
+      } else {
+        console.log("Next items:");
+        for (const item of pending.slice(0, 5)) {
+          console.log(`  ${item.id}: ${item.title} [${item.tags.join(", ")}]`);
+        }
+        if (pending.length > 5) {
+          console.log(`  ... and ${pending.length - 5} more`);
+        }
+      }
+
+      console.log("\nResume prompt:");
+      console.log("─".repeat(60));
+      if (pending.length > 0) {
+        console.log(`Use the sage-agent-tempo skill. Read developer_checklist.yaml — continue working on all pending items. Use parallel agents. Keep working until all items are done.`);
+      }
+      console.log("─".repeat(60));
+      console.log();
+    } catch (err) {
+      console.error("Status failed:", (err as Error).message);
     }
   });
 
