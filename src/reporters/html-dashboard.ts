@@ -97,7 +97,31 @@ function tokenBurnData(timeline: TimelineEvent[]): string {
     times.push(ev.at);
     values.push(cumulative);
   }
-  return JSON.stringify({ times, values });
+
+  // Build "work view" — compress gaps > 10 minutes between turns
+  const GAP_THRESHOLD_MS = 10 * 60 * 1000;
+  const workTimes: string[] = [];
+  const workValues: number[] = [];
+  if (sorted.length > 0) {
+    let offsetMs = 0;
+    let prevRealMs = new Date(sorted[0].at).getTime();
+    let cumWork = 0;
+    for (let i = 0; i < sorted.length; i++) {
+      const realMs = new Date(sorted[i].at).getTime();
+      const gap = realMs - prevRealMs;
+      if (gap > GAP_THRESHOLD_MS) {
+        // Compress: add only a small 1-minute gap instead
+        offsetMs += gap - 60000;
+      }
+      const adjustedMs = realMs - offsetMs;
+      workTimes.push(new Date(adjustedMs).toISOString());
+      cumWork += sorted[i].tokens ?? 0;
+      workValues.push(cumWork);
+      prevRealMs = realMs;
+    }
+  }
+
+  return JSON.stringify({ times, values, workTimes, workValues });
 }
 
 function costPerItemData(items: ChecklistItemResult[], totalCost: number, totalTokens: number): string {
@@ -155,11 +179,63 @@ function testResultsData(items: ChecklistItemResult[]): string {
   for (const item of items) {
     passed += item.tests.passed;
     failed += item.tests.failed;
-    // "created" minus passed+failed gives a rough skip count
     const ran = item.tests.passed + item.tests.failed;
     if (item.tests.created > ran) skipped += item.tests.created - ran;
   }
-  return JSON.stringify({ passed, failed, skipped });
+
+  // Per-phase breakdown
+  const byPhase: Record<string, { passed: number; failed: number; skipped: number }> = {};
+  for (const item of items) {
+    const phase = item.phase || "unknown";
+    if (!byPhase[phase]) byPhase[phase] = { passed: 0, failed: 0, skipped: 0 };
+    byPhase[phase].passed += item.tests.passed;
+    byPhase[phase].failed += item.tests.failed;
+    const ran = item.tests.passed + item.tests.failed;
+    if (item.tests.created > ran) byPhase[phase].skipped += item.tests.created - ran;
+  }
+  const phaseEntries = Object.entries(byPhase).filter(
+    ([, v]) => v.passed + v.failed + v.skipped > 0,
+  );
+
+  return JSON.stringify({
+    passed,
+    failed,
+    skipped,
+    phases: phaseEntries.map(([k]) => k),
+    phasePassed: phaseEntries.map(([, v]) => v.passed),
+    phaseFailed: phaseEntries.map(([, v]) => v.failed),
+    phaseSkipped: phaseEntries.map(([, v]) => v.skipped),
+  });
+}
+
+function tokenEfficiencyData(timeline: TimelineEvent[]): string {
+  const sorted = [...timeline].sort(
+    (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime(),
+  );
+
+  const times: string[] = [];
+  const cumulativeTokens: number[] = [];
+  const cumulativeItems: number[] = [];
+  let tokenSum = 0;
+  let itemSum = 0;
+
+  for (const ev of sorted) {
+    if (ev.type === "checklist_done") {
+      itemSum++;
+      times.push(ev.at);
+      cumulativeTokens.push(tokenSum);
+      cumulativeItems.push(itemSum);
+    }
+    if (ev.tokens && ev.tokens > 0) {
+      tokenSum += ev.tokens;
+      // Also record a token data point (without incrementing items)
+      times.push(ev.at);
+      cumulativeTokens.push(tokenSum);
+      cumulativeItems.push(itemSum);
+    }
+  }
+
+  return JSON.stringify({ times, cumulativeTokens, cumulativeItems });
 }
 
 function modelBreakdownData(modelUsage: ModelUsageEntry[]): string {
@@ -199,6 +275,7 @@ export function generateDashboard(buildLog: BuildLog): string {
   const phases = phaseBreakdownData(checklist.items, summary.totalEstimatedCostUsd, summary.totalTokens);
   const tests = testResultsData(checklist.items);
   const models = modelBreakdownData(summary.modelUsage ?? []);
+  const efficiency = tokenEfficiencyData(timeline);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -211,7 +288,7 @@ export function generateDashboard(buildLog: BuildLog): string {
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background: #f5f6f8;
+    background: #fafaf8;
     color: #1d1d1f;
     line-height: 1.5;
   }
@@ -242,6 +319,10 @@ export function generateDashboard(buildLog: BuildLog): string {
     padding: 16px 24px;
     flex: 1 1 140px;
     min-width: 140px;
+    transition: box-shadow 0.2s ease;
+  }
+  .kpi:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
   }
   .kpi .label {
     font-size: 11px;
@@ -266,6 +347,7 @@ export function generateDashboard(buildLog: BuildLog): string {
     border-radius: 8px;
     padding: 20px;
     overflow: hidden;
+    text-overflow: ellipsis;
   }
   .card.full-width {
     grid-column: 1 / -1;
@@ -276,8 +358,41 @@ export function generateDashboard(buildLog: BuildLog): string {
     margin-bottom: 12px;
     color: #24292e;
   }
-  .chart { width: 100%; min-height: 300px; }
-  .chart-tall { width: 100%; min-height: 400px; }
+  .chart { width: 100%; min-height: 300px; cursor: grab; }
+  .chart-tall { width: 100%; min-height: 400px; cursor: grab; }
+  .chart:active, .chart-tall:active { cursor: grabbing; }
+  .view-toggle {
+    display: inline-flex;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .view-toggle button {
+    padding: 4px 12px;
+    border: none;
+    background: #fff;
+    color: #6a737d;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.15s, color 0.15s;
+  }
+  .view-toggle button.active {
+    background: #4e79a7;
+    color: #fff;
+  }
+  .view-toggle button:not(.active):hover {
+    background: #f0f0f0;
+  }
+  .footer {
+    text-align: center;
+    padding: 20px 32px;
+    font-size: 12px;
+    color: #8b949e;
+    border-top: 1px solid #e1e4e8;
+    margin-top: 8px;
+  }
   @media (max-width: 900px) {
     .grid { grid-template-columns: 1fr; }
     .kpi-row { flex-direction: column; }
@@ -321,6 +436,10 @@ export function generateDashboard(buildLog: BuildLog): string {
   </div>
   <div class="card">
     <h2>Token Burn (Cumulative)</h2>
+    <div class="view-toggle" id="burnToggle">
+      <button class="active" data-view="timeline">Timeline view</button>
+      <button data-view="work">Work view</button>
+    </div>
     <div id="tokenBurn" class="chart"></div>
   </div>
   <div class="card">
@@ -336,14 +455,20 @@ export function generateDashboard(buildLog: BuildLog): string {
     <div id="phaseBreakdown" class="chart"></div>
   </div>
   <div class="card full-width">
+    <h2>Token Efficiency</h2>
+    <div id="tokenEfficiency" class="chart"></div>
+  </div>
+  <div class="card full-width">
     <h2>Agent &amp; Model Breakdown</h2>
     <div id="modelBreakdown" class="chart"></div>
   </div>
   <div class="card full-width">
-    <h2>Test Results</h2>
+    <h2>Test Results (by Phase)</h2>
     <div id="testResults" class="chart"></div>
   </div>
 </div>
+
+<div class="footer">Generated by sage-agent-tempo v0.3.2</div>
 
 <script>
 (function() {
@@ -353,7 +478,14 @@ export function generateDashboard(buildLog: BuildLog): string {
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
   };
-  var config = { displayModeBar: false, responsive: true };
+  var config = { responsive: true, displayModeBar: true, modeBarButtonsToRemove: ['lasso2d', 'select2d'] };
+
+  // ── Resize all charts on window resize ──────────────────────
+  window.addEventListener('resize', function() {
+    document.querySelectorAll('.js-plotly-plot').forEach(function(el) {
+      Plotly.Plots.resize(el);
+    });
+  });
 
   // ── Gantt ─────────────────────────────────────────────────────
   var ganttData = ${gantt};
@@ -403,10 +535,10 @@ export function generateDashboard(buildLog: BuildLog): string {
     }), config);
   }
 
-  // ── Token Burn ────────────────────────────────────────────────
+  // ── Token Burn with Timeline/Work toggle ────────────────────
   var burnData = ${burn};
   if (burnData.times.length > 0) {
-    Plotly.newPlot('tokenBurn', [{
+    var burnTimelineTrace = {
       x: burnData.times,
       y: burnData.values,
       type: 'scatter',
@@ -414,10 +546,37 @@ export function generateDashboard(buildLog: BuildLog): string {
       fill: 'tozeroy',
       line: { color: '#4e79a7', width: 2 },
       fillcolor: 'rgba(78,121,167,0.12)',
-    }], Object.assign({}, layout, {
+    };
+    var burnWorkTrace = {
+      x: burnData.workTimes,
+      y: burnData.workValues,
+      type: 'scatter',
+      mode: 'lines',
+      fill: 'tozeroy',
+      line: { color: '#4e79a7', width: 2 },
+      fillcolor: 'rgba(78,121,167,0.12)',
+    };
+    var burnLayout = Object.assign({}, layout, {
       xaxis: { title: 'Time' },
       yaxis: { title: 'Cumulative Tokens' },
-    }), config);
+    });
+    Plotly.newPlot('tokenBurn', [burnTimelineTrace], burnLayout, config);
+
+    // Toggle handler
+    var toggleEl = document.getElementById('burnToggle');
+    if (toggleEl) {
+      toggleEl.addEventListener('click', function(e) {
+        var btn = e.target;
+        if (!btn.dataset || !btn.dataset.view) return;
+        toggleEl.querySelectorAll('button').forEach(function(b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        var trace = btn.dataset.view === 'work' ? burnWorkTrace : burnTimelineTrace;
+        var xTitle = btn.dataset.view === 'work' ? 'Active Work Time' : 'Time';
+        Plotly.react('tokenBurn', [trace], Object.assign({}, burnLayout, {
+          xaxis: { title: xTitle },
+        }), config);
+      });
+    }
   } else {
     ${noDataPlaceholder("tokenBurn")}
   }
@@ -449,10 +608,12 @@ export function generateDashboard(buildLog: BuildLog): string {
       labels: archData.labels,
       values: archData.values,
       hole: 0.45,
-      textinfo: 'label+percent',
+      textinfo: 'percent',
+      hovertemplate: '%{label}<br>%{value} tokens<br>%{percent}<extra></extra>',
       marker: { colors: ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#9c755f'] },
     }], Object.assign({}, layout, {
-      showlegend: false,
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.15 },
     }), config);
   } else {
     ${noDataPlaceholder("archBreakdown")}
@@ -461,23 +622,57 @@ export function generateDashboard(buildLog: BuildLog): string {
   // ── Phase Breakdown ──────────────────────────────────────────
   var phaseData = ${phases};
   if (phaseData.labels.length > 0) {
-    var phaseText = phaseData.labels.map(function(label, i) {
-      return label + '<br>$' + phaseData.costs[i].toFixed(2) + ' · ' + phaseData.durations[i] + 'm';
+    var phaseHover = phaseData.labels.map(function(label, i) {
+      return label + '<br>$' + phaseData.costs[i].toFixed(2) + ' \\u00b7 ' + phaseData.durations[i] + 'm';
     });
     Plotly.newPlot('phaseBreakdown', [{
       type: 'pie',
       labels: phaseData.labels,
       values: phaseData.costs,
       hole: 0.45,
-      text: phaseText,
-      textinfo: 'label+percent',
-      hovertemplate: '%{label}<br>Cost: $%{value:.2f}<br>%{percent}<extra></extra>',
+      text: phaseHover,
+      textinfo: 'percent',
+      hovertemplate: '%{text}<br>%{percent}<extra></extra>',
       marker: { colors: phaseData.colors },
     }], Object.assign({}, layout, {
-      showlegend: false,
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.15 },
     }), config);
   } else {
     ${noDataPlaceholder("phaseBreakdown")}
+  }
+
+  // ── Token Efficiency (dual-axis) ────────────────────────────
+  var effData = ${efficiency};
+  if (effData.times.length > 0) {
+    Plotly.newPlot('tokenEfficiency', [
+      {
+        x: effData.times,
+        y: effData.cumulativeTokens,
+        type: 'scatter',
+        mode: 'lines',
+        name: 'Cumulative Tokens',
+        line: { color: '#4e79a7', width: 2 },
+        yaxis: 'y',
+      },
+      {
+        x: effData.times,
+        y: effData.cumulativeItems,
+        type: 'scatter',
+        mode: 'lines',
+        name: 'Items Completed',
+        line: { color: '#59a14f', width: 2, shape: 'hv' },
+        yaxis: 'y2',
+      },
+    ], Object.assign({}, layout, {
+      xaxis: { title: 'Time' },
+      yaxis: { title: 'Cumulative Tokens', side: 'left', showgrid: false },
+      yaxis2: { title: 'Items Completed', side: 'right', overlaying: 'y', showgrid: false },
+      legend: { orientation: 'h', y: -0.2 },
+      margin: { t: 24, r: 60, b: 48, l: 60 },
+    }), config);
+  } else {
+    ${noDataPlaceholder("tokenEfficiency")}
   }
 
   // ── Model Breakdown ─────────────────────────────────────────
@@ -493,7 +688,7 @@ export function generateDashboard(buildLog: BuildLog): string {
       values: modelData.tokens,
       hole: 0.5,
       text: modelText,
-      textinfo: 'label+percent',
+      textinfo: 'percent',
       hovertemplate: '%{text}<extra></extra>',
       marker: { colors: modelColors.slice(0, modelData.labels.length) },
       textposition: 'outside',
@@ -513,9 +708,20 @@ export function generateDashboard(buildLog: BuildLog): string {
     ${noDataPlaceholder("modelBreakdown")}
   }
 
-  // ── Test Results ──────────────────────────────────────────────
+  // ── Test Results (per-phase grouped bar) ────────────────────
   var testData = ${tests};
-  if (testData.passed + testData.failed + testData.skipped > 0) {
+  if (testData.phases && testData.phases.length > 0) {
+    Plotly.newPlot('testResults', [
+      { type: 'bar', name: 'Passed', x: testData.phases, y: testData.phasePassed, marker: { color: '#59a14f' } },
+      { type: 'bar', name: 'Failed', x: testData.phases, y: testData.phaseFailed, marker: { color: '#e15759' } },
+      { type: 'bar', name: 'Skipped', x: testData.phases, y: testData.phaseSkipped, marker: { color: '#bab0ac' } },
+    ], Object.assign({}, layout, {
+      barmode: 'group',
+      xaxis: { title: 'Phase' },
+      yaxis: { title: 'Count' },
+      legend: { orientation: 'h', y: -0.2 },
+    }), config);
+  } else if (testData.passed + testData.failed + testData.skipped > 0) {
     Plotly.newPlot('testResults', [
       { type: 'bar', name: 'Passed', x: ['Tests'], y: [testData.passed], marker: { color: '#59a14f' } },
       { type: 'bar', name: 'Failed', x: ['Tests'], y: [testData.failed], marker: { color: '#e15759' } },

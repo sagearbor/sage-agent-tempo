@@ -236,6 +236,8 @@ function findExplicitMention(
       `starting item ${item.id}`,
       `now working on ${item.id}`,
       `moving to ${item.id}`,
+      `completed item ${item.id}`,
+      `completed ${item.id}`,
     ];
     for (const pattern of idPatterns) {
       if (lower.includes(pattern)) return item.id;
@@ -245,6 +247,21 @@ function findExplicitMention(
     if (item.title.length > 10 && lower.includes(item.title.toLowerCase())) {
       return item.id;
     }
+  }
+
+  // Check for range patterns like "Starting items 4.1-4.7" — return the first item in range
+  const rangeMatch = lower.match(/starting items?\s+(\d+\.\d+)\s*[-–]\s*(\d+\.\d+)/);
+  if (rangeMatch) {
+    const startId = rangeMatch[1];
+    const item = checklist.items.find((i) => i.id === startId);
+    if (item) return item.id;
+  }
+
+  // Check for "Starting item X.Y (part N)" patterns
+  const partMatch = lower.match(/starting item\s+(\d+\.\d+)\s*\(part/);
+  if (partMatch) {
+    const item = checklist.items.find((i) => i.id === partMatch[1]);
+    if (item) return item.id;
   }
 
   return undefined;
