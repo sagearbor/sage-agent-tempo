@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "postinstall": "node -e \"const{mkdirSync,copyFileSync,existsSync}=require('fs');const{join}=require('path');const{homedir}=require('os');const d=join(homedir(),'.claude','skills','sage-agent-tempo');const s=join(__dirname,'SKILL.md');if(existsSync(s)){try{mkdirSync(d,{recursive:true});copyFileSync(s,join(d,'SKILL.md'));console.log('sage-agent-tempo: skill installed to '+d)}catch(e){console.warn('sage-agent-tempo: could not install skill -',e.message)}}\""
   },
   "keywords": [
     "claude-code",

@@ -1,5 +1,6 @@
 ---
 name: sage-agent-tempo
+version: 0.3.12
 description: Track what AI agents build, how long it takes, and what it costs. Produces audit reports from session data.
 hooks:
   Stop:
