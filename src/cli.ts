@@ -3,6 +3,7 @@
 import { Command } from "commander";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { archivePrevious } from "./utils/archive.js";
 import { parseChecklist } from "./collectors/checklist.js";
 import { parseAuto } from "./parsers/index.js";
@@ -18,6 +19,27 @@ import { reconcile, formatReconcileTable, fixUncovered } from "./commands/reconc
 import { exportPng } from "./commands/export-png.js";
 import type { BuildLog, ParsedChecklist } from "./parsers/types.js";
 
+const VERSION = "0.3.5";
+
+// ── Update check (non-blocking) ───────────────────────────────────
+function checkForUpdate(): void {
+  try {
+    const result = execFileSync("npm", ["view", "sage-agent-tempo", "version"], {
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (result && result !== VERSION) {
+      console.log(
+        `\n  Update available: ${VERSION} → ${result}` +
+        `\n  Run: npm install -g sage-agent-tempo@latest\n`
+      );
+    }
+  } catch {
+    // Network unavailable or timeout — skip silently
+  }
+}
+
 const program = new Command();
 
 program
@@ -25,7 +47,11 @@ program
   .description(
     "Track what AI agents build, how long it takes, and what it costs"
   )
-  .version("0.3.2");
+  .version(VERSION)
+  .hook("postAction", () => {
+    // Check for updates after command runs (non-blocking UX)
+    checkForUpdate();
+  });
 
 // ── parse ──────────────────────────────────────────────────────────
 
