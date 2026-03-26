@@ -17,9 +17,14 @@ import { writeComparisonDashboard } from "./reporters/comparison-dashboard.js";
 import { collapseChecklist, autoCollapseIfNeeded } from "./commands/collapse.js";
 import { reconcile, formatReconcileTable, fixUncovered } from "./commands/reconcile.js";
 import { exportPng } from "./commands/export-png.js";
+import { fileURLToPath } from "node:url";
 import type { BuildLog, ParsedChecklist } from "./parsers/types.js";
 
-const VERSION = "0.3.5";
+// Read version from package.json so it stays in sync automatically
+const __cliDir = dirname(fileURLToPath(import.meta.url));
+const VERSION = JSON.parse(
+  readFileSync(join(__cliDir, "..", "package.json"), "utf-8")
+).version as string;
 
 // ── Update check (non-blocking) ───────────────────────────────────
 function checkForUpdate(): void {
