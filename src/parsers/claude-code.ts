@@ -274,11 +274,13 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
       seenUuids.add(record.uuid);
     }
 
-    // For subagent files, use the agent ID from the filename as a pseudo-sessionId
-    // so subagent turns get their own session, not merged with the parent
-    const sessionId = isSubagentFile ? fileName : (record.sessionId ?? "unknown");
+    const turn = recordToTurn(record, record.sessionId ?? "unknown");
 
-    const turn = recordToTurn(record, sessionId);
+    // For subagent files, override the sessionId with the filename so each
+    // subagent gets its own session, not merged with the parent
+    if (isSubagentFile) {
+      turn.sessionId = fileName;
+    }
 
     // Prepend subagent task context to the first turn so the correlator
     // can match "Starting item X.Y" from the orchestrator's prompt
