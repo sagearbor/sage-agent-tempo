@@ -7,6 +7,7 @@ import { parseSession } from "../../src/parsers/claude-code.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const fixturePath = join(__dirname, "../fixtures/claude-code/simple-session.jsonl");
+const testResultsFixturePath = join(__dirname, "../fixtures/claude-code/session-with-tests.jsonl");
 
 describe("claude-code parseSession", () => {
   it("extracts the correct number of assistant turns", async () => {
@@ -105,6 +106,37 @@ describe("claude-code parseSession", () => {
     // The fixture has 5 user messages and 5 assistant messages
     // parseSession should only return assistant turns
     expect(turns).toHaveLength(5);
+  });
+
+  it("extracts test results from tool_result blocks", async () => {
+    const turns = await parseSession(testResultsFixturePath);
+
+    // Turn 1 (uuid-t1) ran vitest and the tool_result follows with test output
+    // 8 passed, 1 failed, 2 skipped
+    expect(turns[0].testResults).toBeDefined();
+    expect(turns[0].testResults!.passed).toBe(8);
+    expect(turns[0].testResults!.failed).toBe(1);
+    expect(turns[0].testResults!.skipped).toBe(2);
+
+    // Turn 2 (uuid-t2) is a Write call — no test results
+    expect(turns[1].testResults).toBeUndefined();
+
+    // Turn 3 (uuid-t3) ran vitest again — 11 passed, 0 failed, 0 skipped
+    expect(turns[2].testResults).toBeDefined();
+    expect(turns[2].testResults!.passed).toBe(11);
+    expect(turns[2].testResults!.failed).toBe(0);
+    expect(turns[2].testResults!.skipped).toBe(0);
+
+    // Turn 4 (uuid-t4) is just text — no test results
+    expect(turns[3].testResults).toBeUndefined();
+  });
+
+  it("does not attach test results to turns without test output", async () => {
+    const turns = await parseSession(fixturePath);
+    // The simple fixture has no tool_result blocks with test output
+    for (const turn of turns) {
+      expect(turn.testResults).toBeUndefined();
+    }
   });
 
   it("deduplicates turns by uuid", async () => {
