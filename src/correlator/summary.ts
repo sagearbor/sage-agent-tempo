@@ -75,6 +75,9 @@ export function generateSummary(
   let latestMs = -Infinity;
 
   for (const item of items) {
+    // Exclude overhead from duration — its timestamps are unreliable
+    // (may include stale context from inherited subagent sessions)
+    if (item.id === "_overhead") continue;
     if (item.startedAt) {
       const t = new Date(item.startedAt).getTime();
       if (t < earliestMs) earliestMs = t;

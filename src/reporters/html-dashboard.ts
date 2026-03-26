@@ -60,7 +60,8 @@ function testPassRate(log: BuildLog): string {
 // ── Chart data builders ─────────────────────────────────────────────
 
 function ganttChartData(items: ChecklistItemResult[]): string {
-  const withTimes = items.filter((i) => i.startedAt && i.completedAt);
+  // Exclude overhead from Gantt — its timestamps are unreliable and dominate the chart
+  const withTimes = items.filter((i) => i.startedAt && i.completedAt && i.id !== "_overhead");
   if (withTimes.length === 0) {
     // Fallback: use index-based positioning when timestamps are missing
     const labels = items.map((i) => escapeHtml(i.title));
