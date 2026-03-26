@@ -4,7 +4,7 @@
  * Parses Claude Code session JSONL files into normalized turns and session summaries.
  */
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
   AgentParser,
@@ -20,6 +20,7 @@ interface RawRecord {
   type?: string;
   timestamp?: string;
   sessionId?: string;
+  cwd?: string;
   uuid?: string;
   parentUuid?: string;
   isCompactSummary?: boolean;
@@ -211,7 +212,7 @@ function recordToTurn(record: RawRecord, fallbackSessionId: string): NormalizedT
 /**
  * Parse a single Claude Code JSONL session file into normalized turns.
  */
-export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]> {
+export async function parseSession(jsonlPath: string, expectedCwd?: string): Promise<NormalizedTurn[]> {
   const absPath = resolve(jsonlPath);
   const raw = readFileSync(absPath, "utf-8");
   const records = parseLines(raw);
@@ -247,6 +248,19 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
         break;
       }
     }
+
+    // Check for meta.json companion file with additional task context
+    const metaPath = absPath.replace(/\.jsonl$/, ".meta.json");
+    if (existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(readFileSync(metaPath, "utf-8"));
+        if (meta.description) {
+          subagentTaskContext = (subagentTaskContext ? subagentTaskContext + "\n" : "") + meta.description;
+        }
+      } catch {
+        // Skip malformed meta.json files
+      }
+    }
   }
 
   const seenUuids = new Set<string>();
@@ -259,6 +273,11 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
     // Skip compact summaries and compact boundaries
     if (record.isCompactSummary === true) continue;
     if (record.type === "compact_boundary") continue;
+
+    // Filter out records from a different project directory
+    if (expectedCwd && record.cwd && !record.cwd.startsWith(expectedCwd)) {
+      continue; // Wrong project, skip
+    }
 
     // Only process assistant messages
     if (record.type !== "assistant") continue;
@@ -325,13 +344,14 @@ export async function parseSession(jsonlPath: string): Promise<NormalizedTurn[]>
  */
 export async function parseProjectSessions(
   projectDir: string,
+  expectedCwd?: string,
 ): Promise<SessionSummary[]> {
   const absDir = resolve(projectDir);
   const jsonlFiles = findJsonlFiles(absDir);
   const summaries: SessionSummary[] = [];
 
   for (const filePath of jsonlFiles) {
-    const turns = await parseSession(filePath);
+    const turns = await parseSession(filePath, expectedCwd);
     if (turns.length === 0) continue;
 
     // Group turns by sessionId to handle continuation sessions

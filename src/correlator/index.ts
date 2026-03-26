@@ -18,10 +18,47 @@ export interface CorrelateOptions {
   checklist?: ParsedChecklist;
   commits?: GitCommit[];
   testResults?: TestResults;
+  selfReportItems?: string[];
 }
 
+// ── TEMPO_STATUS extraction ──────────────────────────────────────
+
+export function extractTempoStatus(
+  content: string,
+): { completed: string[]; inProgress: string[] } | undefined {
+  // Look for TEMPO_STATUS block in the content
+  const statusBlockMatch = content.match(
+    /TEMPO_STATUS:\s*\n((?:\s*-\s+(?:completed|in_progress|discovered):.*\n?)*)/,
+  );
+  if (!statusBlockMatch) return undefined;
+
+  const block = statusBlockMatch[1];
+  const completed: string[] = [];
+  const inProgress: string[] = [];
+
+  // Match completed items: - completed: "2.1"
+  const completedRe = /^\s*-\s+completed:\s*"([^"]+)"/gm;
+  let m: RegExpExecArray | null;
+  while ((m = completedRe.exec(block)) !== null) {
+    completed.push(m[1]);
+  }
+
+  // Match in_progress items: - in_progress: "2.3"
+  const inProgressRe = /^\s*-\s+in_progress:\s*"([^"]+)"/gm;
+  while ((m = inProgressRe.exec(block)) !== null) {
+    inProgress.push(m[1]);
+  }
+
+  if (completed.length === 0 && inProgress.length === 0) return undefined;
+  return { completed, inProgress };
+}
+
+// ── Confidence tracking ──────────────────────────────────────────
+
+type ConfidenceLevel = "high" | "medium" | "low";
+
 export function correlate(opts: CorrelateOptions): BuildLog {
-  const { sessions, commits = [], testResults } = opts;
+  const { sessions, commits = [], testResults, selfReportItems } = opts;
 
   // If no checklist provided, auto-infer work blocks from session data
   const checklist = opts.checklist ?? inferWorkBlocks(sessions, commits);
@@ -31,7 +68,7 @@ export function correlate(opts: CorrelateOptions): BuildLog {
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  const itemResults = correlateItemsToTurns(checklist, allTurns, commits);
+  const itemResults = correlateItemsToTurns(checklist, allTurns, commits, selfReportItems);
 
   const buildLog: BuildLog = {
     project: checklist.project,
@@ -67,9 +104,16 @@ export function correlate(opts: CorrelateOptions): BuildLog {
 function correlateItemsToTurns(
   checklist: ParsedChecklist,
   turns: NormalizedTurn[],
-  commits: GitCommit[]
+  commits: GitCommit[],
+  selfReportItems?: string[],
 ): ChecklistItemResult[] {
   const assignments = new Map<string, NormalizedTurn[]>();
+  // Track the confidence level for each item assignment
+  const itemConfidence = new Map<string, ConfidenceLevel>();
+  // Track TEMPO_STATUS completed/in-progress items found in turn content
+  const tempoCompleted = new Set<string>();
+  const tempoInProgress = new Set<string>();
+
   for (const item of checklist.items) {
     assignments.set(item.id, []);
   }
@@ -81,16 +125,45 @@ function correlateItemsToTurns(
   // their own temporal pointer so they don't clobber each other
   const currentItemBySession = new Map<string, string>();
 
+  // Separate bucket for planning turns
+  const planningTurns: NormalizedTurn[] = [];
+
   for (const turn of turns) {
     const content = turn.content ?? "";
     const sid = turn.sessionId;
     let assignedId: string | undefined;
+    let confidence: ConfidenceLevel = "low";
 
-    // Strategy 1: Explicit mention of checklist item ID or title (highest priority)
-    const mentionedId = findExplicitMention(content, checklist);
-    if (mentionedId) {
-      assignedId = mentionedId;
-      currentItemBySession.set(sid, mentionedId);
+    // Skip planning/status turns — don't assign to items or overhead
+    if (isPlanningTurn(content)) {
+      planningTurns.push(turn);
+      continue;
+    }
+
+    // Strategy 0: TEMPO_STATUS block (highest priority)
+    const tempoStatus = extractTempoStatus(content);
+    if (tempoStatus) {
+      // Track all mentioned items for status marking
+      for (const id of tempoStatus.completed) tempoCompleted.add(id);
+      for (const id of tempoStatus.inProgress) tempoInProgress.add(id);
+
+      // Assign this turn to the first mentioned item (completed > in_progress)
+      const firstMentioned = tempoStatus.completed[0] ?? tempoStatus.inProgress[0];
+      if (firstMentioned && assignments.has(firstMentioned)) {
+        assignedId = firstMentioned;
+        confidence = "high";
+        currentItemBySession.set(sid, firstMentioned);
+      }
+    }
+
+    // Strategy 1: Explicit mention of checklist item ID or title
+    if (!assignedId) {
+      const mentionedId = findExplicitMention(content, checklist);
+      if (mentionedId) {
+        assignedId = mentionedId;
+        confidence = "high";
+        currentItemBySession.set(sid, mentionedId);
+      }
     }
 
     // Strategy 2: File-path-based correlation (always wins over temporal)
@@ -98,6 +171,7 @@ function correlateItemsToTurns(
       const fileBasedId = findByFileMatch(turn.filesTouched, checklist, filePatterns);
       if (fileBasedId) {
         assignedId = fileBasedId;
+        confidence = "medium";
         currentItemBySession.set(sid, fileBasedId);
       }
     }
@@ -106,10 +180,16 @@ function correlateItemsToTurns(
     // This prevents parallel agents from bleeding into each other's items
     if (!assignedId) {
       assignedId = currentItemBySession.get(sid);
+      confidence = "low";
     }
 
     if (assignedId && assignments.has(assignedId)) {
       assignments.get(assignedId)!.push(turn);
+      // Upgrade confidence: keep the highest confidence seen for this item
+      const existing = itemConfidence.get(assignedId);
+      if (!existing || confidenceRank(confidence) > confidenceRank(existing)) {
+        itemConfidence.set(assignedId, confidence);
+      }
     } else {
       // Overhead bucket — unmatched turns (planning, discussion, etc.)
       if (!assignments.has("_overhead")) {
@@ -119,16 +199,91 @@ function correlateItemsToTurns(
     }
   }
 
+  // Self-report rescue: re-assign overhead turns to self-reported items
+  if (selfReportItems && selfReportItems.length > 0) {
+    const overheadTurns = assignments.get("_overhead") ?? [];
+    if (overheadTurns.length > 0) {
+      const rescued: NormalizedTurn[] = [];
+      for (const turn of overheadTurns) {
+        const turnTime = new Date(turn.timestamp).getTime();
+        let reassigned = false;
+
+        for (const itemId of selfReportItems) {
+          if (!assignments.has(itemId)) continue;
+          const itemTurns = assignments.get(itemId)!;
+          if (itemTurns.length === 0) {
+            // No existing turns — assign overhead turn directly
+            itemTurns.push(turn);
+            itemConfidence.set(itemId, "high");
+            reassigned = true;
+            break;
+          }
+
+          // Check if this overhead turn overlaps the item's time range
+          const itemStart = new Date(itemTurns[0].timestamp).getTime();
+          const itemEnd = new Date(itemTurns[itemTurns.length - 1].timestamp).getTime();
+          // Extend range by 5 minutes on each side for proximity matching
+          if (turnTime >= itemStart - 5 * 60000 && turnTime <= itemEnd + 5 * 60000) {
+            itemTurns.push(turn);
+            itemConfidence.set(itemId, "high");
+            reassigned = true;
+            break;
+          }
+        }
+
+        if (!reassigned) {
+          rescued.push(turn);
+        }
+      }
+
+      // Update overhead with remaining un-rescued turns
+      assignments.set("_overhead", rescued);
+    }
+  }
+
+  // Mark TEMPO_STATUS and self-reported items with high confidence
+  for (const id of tempoCompleted) {
+    itemConfidence.set(id, "high");
+  }
+  for (const id of tempoInProgress) {
+    if (!itemConfidence.has(id)) {
+      itemConfidence.set(id, "high");
+    }
+  }
+  if (selfReportItems) {
+    for (const id of selfReportItems) {
+      itemConfidence.set(id, "high");
+    }
+  }
+
   // Build the overhead item from unmatched turns
   const overheadTurns = assignments.get("_overhead") ?? [];
   const overheadItem: ChecklistItemResult | undefined =
     overheadTurns.length > 0
-      ? buildItemResult("_overhead", "Planning & overhead", "overhead", [], overheadTurns, commits)
+      ? buildItemResult("_overhead", "Planning & overhead", "overhead", [], overheadTurns, commits, "low")
       : undefined;
 
-  const results = checklist.items.map((item) =>
-    buildItemResult(item.id, item.title, item.phase, item.tags, assignments.get(item.id) ?? [], commits)
-  );
+  const results = checklist.items.map((item) => {
+    const itemTurns = assignments.get(item.id) ?? [];
+    const confidence = itemConfidence.get(item.id) ?? "low";
+
+    // Determine status: TEMPO_STATUS can override
+    let status: "done" | "in_progress" | "pending" | "skipped";
+    if (tempoCompleted.has(item.id)) {
+      status = "done";
+    } else if (tempoInProgress.has(item.id)) {
+      status = "in_progress";
+    } else if (itemTurns.length > 0) {
+      status = "done";
+    } else {
+      status = "pending";
+    }
+
+    return buildItemResult(
+      item.id, item.title, item.phase, item.tags,
+      itemTurns, commits, confidence, status,
+    );
+  });
 
   if (overheadItem) {
     results.push(overheadItem);
@@ -137,13 +292,23 @@ function correlateItemsToTurns(
   return results;
 }
 
+function confidenceRank(level: ConfidenceLevel): number {
+  switch (level) {
+    case "high": return 3;
+    case "medium": return 2;
+    case "low": return 1;
+  }
+}
+
 function buildItemResult(
   id: string,
   title: string,
   phase: string,
   tags: string[],
   itemTurns: NormalizedTurn[],
-  commits: GitCommit[]
+  commits: GitCommit[],
+  confidence: ConfidenceLevel = "low",
+  statusOverride?: "done" | "in_progress" | "pending" | "skipped",
 ): ChecklistItemResult {
   const tokens = aggregateTokens(itemTurns);
   const toolsUsed = [
@@ -174,12 +339,14 @@ function buildItemResult(
     })
     .map((c) => c.sha);
 
+  const status = statusOverride ?? (itemTurns.length > 0 ? ("done" as const) : ("pending" as const));
+
   return {
     id,
     title,
     phase,
     tags,
-    status: itemTurns.length > 0 ? ("done" as const) : ("pending" as const),
+    status,
     startedAt,
     completedAt,
     durationMinutes,
@@ -190,6 +357,7 @@ function buildItemResult(
     filesModified: [],
     tests: aggregateTestResults(itemTurns),
     gitCommits: itemCommits,
+    confidence,
   };
 }
 
@@ -264,7 +432,118 @@ function findExplicitMention(
     if (item) return item.id;
   }
 
+  // Strategy: Work intent patterns — match against item titles (lower priority than explicit ID)
+  const intentPatterns = [
+    /(?:let me|now i(?:'ll| will)|i(?:'ll| will) now|i need to|i should)\s+(?:build|create|implement|write|set up|design|fix|add|configure)\s+(.+?)(?:\.|$)/i,
+    /(?:building|creating|implementing|writing|setting up|designing|fixing|adding|configuring)\s+(?:the\s+)?(.+?)(?:\.|$)/i,
+  ];
+
+  for (const pattern of intentPatterns) {
+    const match = content.match(pattern);
+    if (match?.[1]) {
+      const intentId = findByTitleSimilarity(match[1], checklist);
+      if (intentId) return intentId;
+    }
+  }
+
   return undefined;
+}
+
+/**
+ * Compute Jaccard similarity between two sets of words.
+ * Returns intersection / union.
+ */
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  let intersection = 0;
+  for (const word of a) {
+    if (b.has(word)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+/**
+ * Tokenize a string into lowercase words, filtering out common stop words.
+ */
+function tokenize(text: string): Set<string> {
+  const stopWords = new Set(["the", "a", "an", "and", "or", "to", "for", "of", "in", "on", "with", "is", "it"]);
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !stopWords.has(w));
+  return new Set(words);
+}
+
+/**
+ * Find the best-matching checklist item by title similarity using Jaccard index.
+ * Returns the item ID with highest similarity if it's above the 0.3 threshold.
+ */
+function findByTitleSimilarity(text: string, checklist: ParsedChecklist): string | undefined {
+  const inputTokens = tokenize(text);
+  if (inputTokens.size === 0) return undefined;
+
+  let bestId: string | undefined;
+  let bestScore = 0;
+
+  for (const item of checklist.items) {
+    const titleTokens = tokenize(item.title);
+    if (titleTokens.size === 0) continue;
+
+    const score = jaccardSimilarity(inputTokens, titleTokens);
+    if (score > bestScore) {
+      bestScore = score;
+      bestId = item.id;
+    }
+  }
+
+  return bestScore >= 0.3 ? bestId : undefined;
+}
+
+/**
+ * Detect whether a turn is purely planning/status rather than actual work.
+ * Planning turns should be categorized separately — not assigned to items
+ * and not counted as overhead.
+ */
+export function isPlanningTurn(content: string): boolean {
+  if (!content || content.trim().length === 0) return false;
+
+  const trimmed = content.trim();
+
+  // Summary patterns at the start of the turn
+  const summaryPatterns = [
+    /^all\s+\d+\s+agents?\s+completed/i,
+    /^here'?s\s+what\s+was\s+done/i,
+    /^\*{0,2}summary:?\*{0,2}/i,
+  ];
+  for (const pattern of summaryPatterns) {
+    if (pattern.test(trimmed)) return true;
+  }
+
+  // Content is only questions (no actionable work)
+  const lines = trimmed.split("\n").filter((l) => l.trim().length > 0);
+  const allQuestions = lines.every((line) => {
+    const l = line.trim();
+    return (
+      /^(should\s+we|do\s+you\s+want\s+me\s+to|would\s+you\s+like|shall\s+i)\b/i.test(l) ||
+      l.endsWith("?")
+    );
+  });
+  if (allQuestions && lines.length > 0) return true;
+
+  // Content is only file listing/reading without modifications
+  const onlyReading = lines.every((line) => {
+    const l = line.trim();
+    return (
+      /^(reading|listing|checking|looking at|examining|reviewing)\s+/i.test(l) ||
+      /^(file|directory|folder):/i.test(l) ||
+      /^[-•]\s*(src|lib|test|config|package)\//i.test(l) ||
+      l === ""
+    );
+  });
+  if (onlyReading && lines.length > 0) return true;
+
+  return false;
 }
 
 /**
@@ -272,7 +551,7 @@ function findExplicitMention(
  * Works for ANY project by extracting paths from:
  * 1. Acceptance criteria (file paths mentioned in the text)
  * 2. Notes field
- * 3. Title (extract path-like segments: "src/foo/bar.ts exports:" → "src/foo/bar")
+ * 3. Title (extract path-like segments: "src/foo/bar.ts exports:" -> "src/foo/bar")
  *
  * Patterns are sorted longest-first so more specific paths match before
  * broad directory patterns.

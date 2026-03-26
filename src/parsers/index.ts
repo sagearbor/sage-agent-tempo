@@ -54,7 +54,7 @@ export async function parseAuto(
 
     if (agent === "claude-code") {
       const dir = opts.sessionDir || findClaudeProjectDir();
-      const sessions = await parseProjectSessions(dir);
+      const sessions = await parseProjectSessions(dir, resolve(process.cwd()));
       allSessions.push(...sessions);
     } else if (agent === "codex") {
       const dir = opts.sessionDir || join(homedir(), ".codex");
@@ -74,19 +74,19 @@ export async function parseAuto(
  * Find the Claude Code project directory for the current working directory.
  * Claude Code stores sessions at ~/.claude/projects/<slug>/ where the slug
  * is the CWD path with / replaced by - and prefixed with -.
- * Falls back to scanning all projects if the specific directory isn't found.
+ * Returns the project-specific directory only — never falls back to scanning
+ * all projects, which would silently mix data from other repos.
  */
 function findClaudeProjectDir(): string {
   const cwd = resolve(process.cwd());
   const slug = cwd.replace(/\//g, "-");
   const projectDir = join(homedir(), ".claude", "projects", slug);
 
-  if (existsSync(projectDir)) {
-    return projectDir;
+  if (!existsSync(projectDir)) {
+    console.warn(`No Claude Code sessions found for this project (expected: ${projectDir})`);
   }
 
-  // Fallback: scan all projects (less accurate but works if cwd changed)
-  return join(homedir(), ".claude", "projects");
+  return projectDir; // Always return project-specific dir, never scan all
 }
 
 export { claudeCodeParser } from "./claude-code.js";

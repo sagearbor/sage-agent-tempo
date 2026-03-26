@@ -60,14 +60,25 @@ function testPassRate(log: BuildLog): string {
 // ── Chart data builders ─────────────────────────────────────────────
 
 function ganttChartData(items: ChecklistItemResult[]): string {
-  // Exclude overhead from Gantt — its timestamps are unreliable and dominate the chart
-  const withTimes = items.filter((i) => i.startedAt && i.completedAt && i.id !== "_overhead");
-  if (withTimes.length === 0) {
+  // Include all items (including overhead) — overhead gets grey color and is placed at bottom
+  const withTimes = items.filter((i) => i.startedAt && i.completedAt);
+
+  // Sort: non-overhead items first (preserve order), overhead at the bottom
+  const sorted = [
+    ...withTimes.filter((i) => i.id !== "_overhead"),
+    ...withTimes.filter((i) => i.id === "_overhead"),
+  ];
+
+  if (sorted.length === 0) {
     // Fallback: use index-based positioning when timestamps are missing
-    const labels = items.map((i) => escapeHtml(i.title));
-    const durations = items.map((i) => i.durationMinutes ?? 0);
-    const colors = items.map((i) => phaseColor(i.phase));
-    const phases = items.map((i) => i.phase);
+    const fallbackSorted = [
+      ...items.filter((i) => i.id !== "_overhead"),
+      ...items.filter((i) => i.id === "_overhead"),
+    ];
+    const labels = fallbackSorted.map((i) => escapeHtml(i.title));
+    const durations = fallbackSorted.map((i) => i.durationMinutes ?? 0);
+    const colors = fallbackSorted.map((i) => i.id === "_overhead" ? "#bab0ac" : phaseColor(i.phase));
+    const phases = fallbackSorted.map((i) => i.id === "_overhead" ? "overhead" : i.phase);
     return JSON.stringify({
       labels,
       durations,
@@ -77,11 +88,11 @@ function ganttChartData(items: ChecklistItemResult[]): string {
     });
   }
 
-  const labels = withTimes.map((i) => escapeHtml(i.title));
-  const starts = withTimes.map((i) => i.startedAt);
-  const ends = withTimes.map((i) => i.completedAt);
-  const colors = withTimes.map((i) => phaseColor(i.phase));
-  const phases = withTimes.map((i) => i.phase);
+  const labels = sorted.map((i) => escapeHtml(i.title));
+  const starts = sorted.map((i) => i.startedAt);
+  const ends = sorted.map((i) => i.completedAt);
+  const colors = sorted.map((i) => i.id === "_overhead" ? "#bab0ac" : phaseColor(i.phase));
+  const phases = sorted.map((i) => i.id === "_overhead" ? "overhead" : i.phase);
   return JSON.stringify({
     labels,
     starts,

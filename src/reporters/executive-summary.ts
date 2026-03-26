@@ -46,6 +46,16 @@ function statusBadge(status: string): string {
   return `<span class="badge" style="background:${c.bg};color:${c.fg}">${label}</span>`;
 }
 
+function confidenceBadge(confidence: string): string {
+  const colors: Record<string, { bg: string; fg: string }> = {
+    high: { bg: "#d4edda", fg: "#155724" },
+    medium: { bg: "#fff3cd", fg: "#856404" },
+    low: { bg: "#f8d7da", fg: "#721c24" },
+  };
+  const c = colors[confidence] ?? colors["low"]!;
+  return `<span class="badge" style="background:${c.bg};color:${c.fg}">${confidence}</span>`;
+}
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
@@ -318,7 +328,7 @@ export function generateExecutiveSummary(
   <h3>${escapeHtml(phase.name)}</h3>
   <table>
     <thead>
-      <tr><th>Item</th><th>Status</th><th>Duration</th><th>Est. Cost</th></tr>
+      <tr><th>Item</th><th>Status</th><th>Confidence</th><th>Duration</th><th>Est. Cost</th></tr>
     </thead>
     <tbody>
 `;
@@ -332,6 +342,7 @@ export function generateExecutiveSummary(
       html += `      <tr>
         <td>${escapeHtml(item.title)}</td>
         <td>${statusBadge(item.status)}</td>
+        <td>${confidenceBadge(item.confidence ?? "low")}</td>
         <td>${item.durationMinutes != null ? formatDuration(item.durationMinutes) : "—"}</td>
         <td>${itemCost > 0 ? formatCost(itemCost) : "—"}</td>
       </tr>
@@ -343,6 +354,7 @@ export function generateExecutiveSummary(
       <tr>
         <th>Phase Total</th>
         <th>${phase.items.filter((i) => i.status === "done").length}/${phase.items.length} done</th>
+        <th></th>
         <th>${formatDuration(phaseDuration)}</th>
         <th>${formatCost(phaseCost)}</th>
       </tr>

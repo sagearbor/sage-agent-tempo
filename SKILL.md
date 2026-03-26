@@ -70,6 +70,7 @@ phases:
 4. **If you are spawning subagents**: include the checklist item ID in the subagent's prompt. Example: "You are working on item 2.3. Say 'Starting item 2.3' at the beginning of your response."
 5. **If you are a subagent**: say "Starting item X.Y" at the top of your first response AND include a TEMPO_STATUS block at the end (see format below). Do NOT modify `developer_checklist.yaml` directly.
 6. **When scope changes** (main agent only): update `developer_checklist.yaml` — add new items, update titles, mark status.
+7. **When finishing a session**: include a TEMPO_STATUS block summarizing all items you worked on. This helps the tracker accurately attribute your work, especially for turns that couldn't be matched by other strategies.
 
 ### After work
 

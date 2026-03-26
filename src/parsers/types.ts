@@ -116,6 +116,7 @@ export const ChecklistItemResultSchema = z.object({
     })
     .default({}),
   gitCommits: z.array(z.string()).default([]),
+  confidence: z.enum(["high", "medium", "low"]).default("low"),
 });
 export type ChecklistItemResult = z.infer<typeof ChecklistItemResultSchema>;
 

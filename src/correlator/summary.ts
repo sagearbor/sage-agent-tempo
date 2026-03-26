@@ -70,14 +70,11 @@ export function generateSummary(
   }
   const items = buildLog.checklist.items;
 
-  // ── Total duration: earliest startedAt → latest completedAt ──
+  // ── Total duration: earliest startedAt → latest completedAt across ALL items ──
   let earliestMs = Infinity;
   let latestMs = -Infinity;
 
   for (const item of items) {
-    // Exclude overhead from duration — its timestamps are unreliable
-    // (may include stale context from inherited subagent sessions)
-    if (item.id === "_overhead") continue;
     if (item.startedAt) {
       const t = new Date(item.startedAt).getTime();
       if (t < earliestMs) earliestMs = t;
@@ -88,10 +85,19 @@ export function generateSummary(
     }
   }
 
-  const totalDurationMinutes =
+  let totalDurationMinutes =
     earliestMs !== Infinity && latestMs !== -Infinity
       ? (latestMs - earliestMs) / 60_000
       : 0;
+
+  // Sanity check: if duration exceeds 48 hours, timestamps are likely corrupt
+  const MAX_DURATION_MINUTES = 48 * 60;
+  if (totalDurationMinutes > MAX_DURATION_MINUTES) {
+    console.warn(
+      `Duration ${Math.round(totalDurationMinutes)}m exceeds 48h — timestamps may be corrupt. Clamping to 48h.`,
+    );
+    totalDurationMinutes = MAX_DURATION_MINUTES;
+  }
 
   // ── Token totals ──
   let totalTokens = 0;

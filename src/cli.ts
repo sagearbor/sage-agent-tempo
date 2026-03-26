@@ -73,6 +73,7 @@ program
   .option("--session-dir <path>", "Override session directory")
   .option("--no-archive", "Skip archiving previous build_log.json")
   .option("--no-auto-collapse", "Skip auto-collapsing 100% complete phases")
+  .option("--self-report <items>", "Comma-separated list of item IDs worked on (e.g., '2.1,2.3,4.1')")
   .action(async (opts) => {
     try {
       let checklist: ParsedChecklist | undefined;
@@ -106,8 +107,12 @@ program
         new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
       );
 
+      const selfReportItems = opts.selfReport
+        ? (opts.selfReport as string).split(",").map((s: string) => s.trim())
+        : undefined;
+
       console.log("Correlating data...");
-      const buildLog = correlate({ sessions, checklist, commits });
+      const buildLog = correlate({ sessions, checklist, commits, selfReportItems });
 
       if (!checklist) {
         console.log(
@@ -240,6 +245,7 @@ program
   .option("--format <format>", "Report format", "all")
   .option("--output-dir <dir>", "Report output directory", "reports")
   .option("--no-archive", "Skip archiving previous files")
+  .option("--self-report <items>", "Comma-separated list of item IDs worked on (e.g., '2.1,2.3,4.1')")
   .action(async (opts) => {
     try {
       // ── Parse phase ──────────────────────────────────────────────
@@ -268,8 +274,12 @@ program
         new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
       );
 
+      const selfReportItems = opts.selfReport
+        ? (opts.selfReport as string).split(",").map((s: string) => s.trim())
+        : undefined;
+
       console.log("Correlating data...");
-      const buildLog = correlate({ sessions, checklist, commits });
+      const buildLog = correlate({ sessions, checklist, commits, selfReportItems });
 
       const buildLogPath = resolve("build_log.json");
 
