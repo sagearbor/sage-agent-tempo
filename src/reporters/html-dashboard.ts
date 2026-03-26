@@ -91,46 +91,6 @@ function ganttChartData(items: ChecklistItemResult[]): string {
   });
 }
 
-function tokenBurnData(timeline: TimelineEvent[]): string {
-  const sorted = [...timeline]
-    .filter((e) => e.tokens && e.tokens > 0)
-    .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
-
-  let cumulative = 0;
-  const times: string[] = [];
-  const values: number[] = [];
-  for (const ev of sorted) {
-    cumulative += ev.tokens ?? 0;
-    times.push(ev.at);
-    values.push(cumulative);
-  }
-
-  // Build "work view" — compress gaps > 10 minutes between turns
-  const GAP_THRESHOLD_MS = 10 * 60 * 1000;
-  const workTimes: string[] = [];
-  const workValues: number[] = [];
-  if (sorted.length > 0) {
-    let offsetMs = 0;
-    let prevRealMs = new Date(sorted[0].at).getTime();
-    let cumWork = 0;
-    for (let i = 0; i < sorted.length; i++) {
-      const realMs = new Date(sorted[i].at).getTime();
-      const gap = realMs - prevRealMs;
-      if (gap > GAP_THRESHOLD_MS) {
-        // Compress: add only a small 1-minute gap instead
-        offsetMs += gap - 60000;
-      }
-      const adjustedMs = realMs - offsetMs;
-      workTimes.push(new Date(adjustedMs).toISOString());
-      cumWork += sorted[i].tokens ?? 0;
-      workValues.push(cumWork);
-      prevRealMs = realMs;
-    }
-  }
-
-  return JSON.stringify({ times, values, workTimes, workValues });
-}
-
 function costPerItemData(items: ChecklistItemResult[], totalCost: number, totalTokens: number): string {
   const costPerToken = totalTokens > 0 ? totalCost / totalTokens : 0;
   const entries = items
@@ -242,7 +202,29 @@ function tokenEfficiencyData(timeline: TimelineEvent[]): string {
     }
   }
 
-  return JSON.stringify({ times, cumulativeTokens, cumulativeItems });
+  // Build "work view" — compress gaps > 10 minutes between events
+  const GAP_THRESHOLD_MS = 10 * 60 * 1000;
+  const workTimes: string[] = [];
+  const workTokens: number[] = [];
+  const workItems: number[] = [];
+  if (times.length > 0) {
+    let offsetMs = 0;
+    let prevRealMs = new Date(times[0]).getTime();
+    for (let i = 0; i < times.length; i++) {
+      const realMs = new Date(times[i]).getTime();
+      const gap = realMs - prevRealMs;
+      if (gap > GAP_THRESHOLD_MS) {
+        offsetMs += gap - 60000;
+      }
+      const adjustedMs = realMs - offsetMs;
+      workTimes.push(new Date(adjustedMs).toISOString());
+      workTokens.push(cumulativeTokens[i]);
+      workItems.push(cumulativeItems[i]);
+      prevRealMs = realMs;
+    }
+  }
+
+  return JSON.stringify({ times, cumulativeTokens, cumulativeItems, workTimes, workTokens, workItems });
 }
 
 function modelBreakdownData(modelUsage: ModelUsageEntry[]): string {
@@ -276,7 +258,6 @@ export function generateDashboard(buildLog: BuildLog): string {
   });
 
   const gantt = ganttChartData(checklist.items);
-  const burn = tokenBurnData(timeline);
   const cost = costPerItemData(checklist.items, summary.totalEstimatedCostUsd, summary.totalTokens);
   const arch = archBreakdownData(summary.architectureBreakdown);
   const phases = phaseBreakdownData(checklist.items, summary.totalEstimatedCostUsd, summary.totalTokens);
@@ -442,14 +423,6 @@ export function generateDashboard(buildLog: BuildLog): string {
     <div id="gantt" class="chart-tall"></div>
   </div>
   <div class="card">
-    <h2>Token Burn (Cumulative)</h2>
-    <div class="view-toggle" id="burnToggle">
-      <button class="active" data-view="timeline">Timeline view</button>
-      <button data-view="work">Work view</button>
-    </div>
-    <div id="tokenBurn" class="chart"></div>
-  </div>
-  <div class="card">
     <h2>Cost per Item</h2>
     <div id="costPerItem" class="chart"></div>
   </div>
@@ -463,6 +436,14 @@ export function generateDashboard(buildLog: BuildLog): string {
   </div>
   <div class="card full-width">
     <h2>Token Efficiency</h2>
+    <div class="view-toggle" id="effToggle">
+      <button class="active" data-view="timeline">Timeline view</button>
+      <button data-view="work">Work view</button>
+    </div>
+    <div style="margin-bottom:8px;font-size:13px;">
+      <label style="margin-right:12px;"><input type="checkbox" checked id="effChkTokens"> Cumulative Tokens</label>
+      <label><input type="checkbox" checked id="effChkItems"> Items Completed</label>
+    </div>
     <div id="tokenEfficiency" class="chart"></div>
   </div>
   <div class="card full-width">
@@ -542,52 +523,6 @@ export function generateDashboard(buildLog: BuildLog): string {
     }), config);
   }
 
-  // ── Token Burn with Timeline/Work toggle ────────────────────
-  var burnData = ${burn};
-  if (burnData.times.length > 0) {
-    var burnTimelineTrace = {
-      x: burnData.times,
-      y: burnData.values,
-      type: 'scatter',
-      mode: 'lines',
-      fill: 'tozeroy',
-      line: { color: '#4e79a7', width: 2 },
-      fillcolor: 'rgba(78,121,167,0.12)',
-    };
-    var burnWorkTrace = {
-      x: burnData.workTimes,
-      y: burnData.workValues,
-      type: 'scatter',
-      mode: 'lines',
-      fill: 'tozeroy',
-      line: { color: '#4e79a7', width: 2 },
-      fillcolor: 'rgba(78,121,167,0.12)',
-    };
-    var burnLayout = Object.assign({}, layout, {
-      xaxis: { title: 'Time' },
-      yaxis: { title: 'Cumulative Tokens' },
-    });
-    Plotly.newPlot('tokenBurn', [burnTimelineTrace], burnLayout, config);
-
-    // Toggle handler
-    var toggleEl = document.getElementById('burnToggle');
-    if (toggleEl) {
-      toggleEl.addEventListener('click', function(e) {
-        var btn = e.target;
-        if (!btn.dataset || !btn.dataset.view) return;
-        toggleEl.querySelectorAll('button').forEach(function(b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        var trace = btn.dataset.view === 'work' ? burnWorkTrace : burnTimelineTrace;
-        var xTitle = btn.dataset.view === 'work' ? 'Active Work Time' : 'Time';
-        Plotly.react('tokenBurn', [trace], Object.assign({}, burnLayout, {
-          xaxis: { title: xTitle },
-        }), config);
-      });
-    }
-  } else {
-    ${noDataPlaceholder("tokenBurn")}
-  }
-
   // ── Cost per Item ─────────────────────────────────────────────
   var costData = ${cost};
   if (costData.labels.length > 0) {
@@ -649,35 +584,69 @@ export function generateDashboard(buildLog: BuildLog): string {
     ${noDataPlaceholder("phaseBreakdown")}
   }
 
-  // ── Token Efficiency (dual-axis) ────────────────────────────
+  // ── Token Efficiency (dual-axis with timeline/work toggle + checkboxes) ──
   var effData = ${efficiency};
   if (effData.times.length > 0) {
-    Plotly.newPlot('tokenEfficiency', [
-      {
-        x: effData.times,
-        y: effData.cumulativeTokens,
-        type: 'scatter',
-        mode: 'lines',
-        name: 'Cumulative Tokens',
-        line: { color: '#4e79a7', width: 2 },
-        yaxis: 'y',
-      },
-      {
-        x: effData.times,
-        y: effData.cumulativeItems,
-        type: 'scatter',
-        mode: 'lines',
-        name: 'Items Completed',
-        line: { color: '#59a14f', width: 2, shape: 'hv' },
-        yaxis: 'y2',
-      },
-    ], Object.assign({}, layout, {
-      xaxis: { title: 'Time' },
-      yaxis: { title: 'Cumulative Tokens', side: 'left', showgrid: false },
-      yaxis2: { title: 'Items Completed', side: 'right', overlaying: 'y', showgrid: false },
-      legend: { orientation: 'h', y: -0.2 },
-      margin: { t: 24, r: 60, b: 48, l: 60 },
-    }), config);
+    var effCurrentView = 'timeline';
+    function effTokenTrace(view) {
+      var t = view === 'work' ? effData.workTimes : effData.times;
+      var v = view === 'work' ? effData.workTokens : effData.cumulativeTokens;
+      return {
+        x: t, y: v, type: 'scatter', mode: 'lines',
+        name: 'Cumulative Tokens', line: { color: '#4e79a7', width: 2 }, yaxis: 'y',
+      };
+    }
+    function effItemTrace(view) {
+      var t = view === 'work' ? effData.workTimes : effData.times;
+      var v = view === 'work' ? effData.workItems : effData.cumulativeItems;
+      return {
+        x: t, y: v, type: 'scatter', mode: 'lines',
+        name: 'Items Completed', line: { color: '#59a14f', width: 2, shape: 'hv' }, yaxis: 'y2',
+      };
+    }
+    function effLayout(view) {
+      return Object.assign({}, layout, {
+        xaxis: { title: view === 'work' ? 'Active Work Time' : 'Time' },
+        yaxis: { title: 'Cumulative Tokens', side: 'left', showgrid: false },
+        yaxis2: { title: 'Items Completed', side: 'right', overlaying: 'y', showgrid: false },
+        legend: { orientation: 'h', y: -0.2 },
+        margin: { t: 24, r: 60, b: 48, l: 60 },
+      });
+    }
+    Plotly.newPlot('tokenEfficiency', [effTokenTrace('timeline'), effItemTrace('timeline')], effLayout('timeline'), config);
+
+    // View toggle handler
+    var effToggleEl = document.getElementById('effToggle');
+    if (effToggleEl) {
+      effToggleEl.addEventListener('click', function(e) {
+        var btn = e.target;
+        if (!btn.dataset || !btn.dataset.view) return;
+        effToggleEl.querySelectorAll('button').forEach(function(b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        effCurrentView = btn.dataset.view;
+        var tokChk = document.getElementById('effChkTokens');
+        var itmChk = document.getElementById('effChkItems');
+        var t1 = effTokenTrace(effCurrentView);
+        var t2 = effItemTrace(effCurrentView);
+        t1.visible = tokChk.checked ? true : 'legendonly';
+        t2.visible = itmChk.checked ? true : 'legendonly';
+        Plotly.react('tokenEfficiency', [t1, t2], effLayout(effCurrentView), config);
+      });
+    }
+
+    // Checkbox handlers
+    var effChkTokens = document.getElementById('effChkTokens');
+    var effChkItems = document.getElementById('effChkItems');
+    if (effChkTokens) {
+      effChkTokens.addEventListener('change', function() {
+        Plotly.restyle('tokenEfficiency', { visible: this.checked ? true : 'legendonly' }, [0]);
+      });
+    }
+    if (effChkItems) {
+      effChkItems.addEventListener('change', function() {
+        Plotly.restyle('tokenEfficiency', { visible: this.checked ? true : 'legendonly' }, [1]);
+      });
+    }
   } else {
     ${noDataPlaceholder("tokenEfficiency")}
   }
