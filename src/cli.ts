@@ -25,7 +25,7 @@ program
   .description(
     "Track what AI agents build, how long it takes, and what it costs"
   )
-  .version("0.1.0");
+  .version("0.3.1");
 
 // ── parse ──────────────────────────────────────────────────────────
 

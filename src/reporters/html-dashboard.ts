@@ -189,6 +189,7 @@ export function generateDashboard(buildLog: BuildLog): string {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    timeZoneName: "short",
   });
 
   const gantt = ganttChartData(checklist.items);
